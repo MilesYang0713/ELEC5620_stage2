@@ -1,1 +1,88 @@
-# ELEC5620_stage2
+# ELEC5620_stage2 — SoloRetail AI
+
+Proof-of-concept for ELEC5620 Stage 2, based on the group's Stage 1 report. This first scaffold provides a runnable demo-mode vertical slice: owner dashboard → workflow selection → observable specialist-agent results → advisory recommendations → approval decision and audit entry. It does not perform real price, inventory, or marketing actions.
+
+## Requirements mapping
+
+| Stage 1 / Stage 2 requirement | First-slice implementation |
+| --- | --- |
+| Owner natural-language request and Manager coordination | `POST /api/analyze`; workflow is inferred from the request and routed to visible specialist steps |
+| Sales, Inventory, Pricing, Marketing roles | `backend/app/orchestrator.py`; deterministic demo evidence clearly comes from seeded data |
+| Consolidated evidence and limitations | Analysis result cards and recommendation evidence/limitations |
+| Human oversight and advisory-only output | Recommendation decisions only change prototype status; no business action is executed |
+| Agent failures/partial results | Agent result model carries state, detail, and limitation; failure injection is a follow-up slice |
+| Audit and timestamp traceability | In-memory audit entries for demo analysis and approval decisions |
+| Customer enquiries and feedback | API contracts are reserved in this slice; customer screens and persistence are follow-up work |
+| Agile collaboration and contribution | No Jira history or member contributions are fabricated; group members should add actual records/statements |
+
+## Stack and structure
+
+- Frontend: React, TypeScript, Vite, Tailwind CSS (Node.js 20)
+- API: FastAPI (Python 3.11)
+- Database/agents: integration points and schema are planned for Supabase PostgreSQL and CrewAI. This initial scaffold uses deterministic in-memory demo data so it can be demonstrated without secrets or network access.
+- Deployment: Docker Compose and GitHub Actions starter configuration
+
+```text
+backend/app/          FastAPI routes and demo orchestration
+backend/migrations/   Supabase PostgreSQL schema and demo seed
+frontend/src/         React owner dashboard
+```
+
+## Run locally
+
+### Docker Compose
+
+1. Install Docker Desktop with Compose support.
+2. Copy `.env.example` to `.env`. Keep real keys only in `.env`; never commit it.
+3. Run `docker compose up --build` from this directory.
+4. Open <http://localhost:5173>. The API health endpoint is <http://localhost:8000/health>.
+
+### Run without Docker
+
+Backend (Python 3.11):
+
+```powershell
+cd backend
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
+
+Frontend (Node.js 20):
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+The Vite development server proxies `/api` to `http://localhost:8000`.
+
+## Demo walkthrough
+
+1. Open the owner dashboard and choose one of the four scenario chips, or type a business question.
+2. Start the analysis and follow each specialist agent's status and evidence.
+3. Review the advisory recommendation, supporting data, uncertainty, and approval label.
+4. Approve or reject a high-risk recommendation. The audit feed records the decision and time; the UI explicitly says no external business action occurred.
+5. The four Stage 1 flows are represented by sales decline, overstock, demand spike, and customer feedback. The initial deterministic analysis is a scaffold; deeper scenario evidence and customer-facing interactions will be built in later iterations.
+
+## Data and integrations
+
+The current API reports `demo` mode and uses small seeded examples. It does not claim cloud persistence. `backend/migrations/001_initial_schema.sql` defines the intended Supabase tables with row-level security enabled and no public policies; Supabase and OpenAI are not yet connected. Configure credentials only when those integrations are implemented. Do not share secrets in chat or commit them.
+
+## Known limitations / next slices
+
+- Current records live in process memory and reset when the API restarts.
+- CrewAI execution, OpenAI model calls, Supabase repositories, customer Q&A and feedback UI are not wired yet.
+- Demo analysis uses deterministic sample evidence; it is not a live-store forecast or statistical significance claim.
+- Approval is a logged prototype decision only; it never changes real prices, stock, or campaigns.
+- Add error/timeout injection, persisted audit trail, scenario-specific calculations, privacy-safe feedback analysis, and evaluation of outcomes in later iterations.
+
+## Canvas submission checklist
+
+- [ ] Run from a clean checkout using this README.
+- [ ] Confirm demo mode and approval behavior in the live walkthrough.
+- [ ] Attach the group's real contribution statement and any required Agile evidence; do not infer contribution from this scaffold.
+- [ ] Remove local `.env` and verify no secrets or real customer data are included.
+- [ ] Reconcile implementation against the final Stage 1 report and tutor feedback.
