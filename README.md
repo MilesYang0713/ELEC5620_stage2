@@ -19,7 +19,7 @@ Proof-of-concept for ELEC5620 Stage 2, based on the group's Stage 1 report. This
 
 - Frontend: React, TypeScript, Vite, Tailwind CSS (Node.js 20)
 - API: FastAPI (Python 3.11)
-- Database/agents: integration points and schema are planned for Supabase PostgreSQL and CrewAI. This initial scaffold uses deterministic in-memory demo data so it can be demonstrated without secrets or network access.
+
 - Deployment: Docker Compose and GitHub Actions starter configuration
 
 ```text
@@ -69,12 +69,11 @@ The Vite development server proxies `/api` to `http://localhost:8000`.
 
 ## Data and integrations
 
-The current API reports `demo` mode and uses small seeded examples. It does not claim cloud persistence. `backend/migrations/001_initial_schema.sql` defines the intended Supabase tables with row-level security enabled and no public policies; Supabase and OpenAI are not yet connected. Configure credentials only when those integrations are implemented. Do not share secrets in chat or commit them.
+
 
 ## Known limitations / next slices
 
 - Current records live in process memory and reset when the API restarts.
-- CrewAI execution, OpenAI model calls, Supabase repositories, customer Q&A and feedback UI are not wired yet.
 - Demo analysis uses deterministic sample evidence; it is not a live-store forecast or statistical significance claim.
 - Approval is a logged prototype decision only; it never changes real prices, stock, or campaigns.
 - Add error/timeout injection, persisted audit trail, scenario-specific calculations, privacy-safe feedback analysis, and evaluation of outcomes in later iterations.
