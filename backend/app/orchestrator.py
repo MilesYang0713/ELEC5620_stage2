@@ -1,13 +1,13 @@
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from .demo_data import FEEDBACK, PRODUCTS
-from .llm_client import LLMConfigurationError, LLMRequestError, chat_completion
+from .llm_client import LLMRequestError
 from .models import AgentResult, AnalysisRun, Recommendation, Workflow
+from .crewai_flow import run_retail_analysis_flow
 
 AGENTS = ["Sales Agent", "Inventory Agent", "Pricing Agent", "Marketing Agent"]
 AGENT_TASKS = {
@@ -33,19 +33,19 @@ def infer_workflow(question: str) -> Workflow:
     return "sales_decline"
 
 
-def _business_facts() -> list[str]:
+def _business_facts(products: list[dict] = PRODUCTS, feedback_records: list[dict] = FEEDBACK) -> list[str]:
     facts: list[str] = []
-    for product in PRODUCTS:
+    for product in products:
         delta = product["units_sold_7d"] - product["units_sold_prev_7d"]
         facts.extend([
             f"{product['name']} sold {product['units_sold_7d']} units in the last 7 days and {product['units_sold_prev_7d']} in the previous 7 days (change: {delta:+} units).",
-            f"{product['name']} has {product['stock']} units in demo stock.",
+            f"{product['name']} has {product['stock']} units in stock.",
             f"{product['name']} is listed at A${product['price']:.2f}; cost and margin data are unavailable.",
         ])
-    names = {p["id"]: p["name"] for p in PRODUCTS}
-    for feedback in FEEDBACK:
+    names = {p["id"]: p["name"] for p in products}
+    for feedback in feedback_records:
         facts.append(f"Customer feedback for {names.get(feedback['product_id'], 'an unknown product')}: {feedback['content']}")
-    facts.append("No live campaign history, supplier lead-time feed, competitor data, or real store data is connected.")
+    facts.append("No live campaign history, supplier lead-time feed, or competitor data is available in the connected records.")
     return facts
 
 
@@ -76,25 +76,16 @@ def _strings(value: Any, limit: int = 8) -> list[str]:
     return [item.strip()[:500] for item in value if isinstance(item, str) and item.strip()][:limit]
 
 
-def _run_agent(name: str, question: str, flow: Workflow, facts: list[str]) -> AgentResult:
-    now = datetime.now(timezone.utc)
-    system = (
-        f"You are the {name} in a retail multi-agent system. {AGENT_TASKS[name]} "
-        "Use only the supplied demo facts. Never invent data, external events, causes, or calculations. "
-        "Return one JSON object with string 'summary', array 'evidence' containing exact supplied fact sentences, "
-        "and array 'limitations'. Keep it concise and state uncertainty."
-    )
-    user = json.dumps({"workflow": flow, "owner_question": question, "available_facts": facts}, ensure_ascii=False)
-    result = _parse_json_object(chat_completion(system, user))
-    evidence = [line for line in _strings(result.get("evidence")) if line in facts]
-    return AgentResult(
-        agent=name,
-        status="completed",
-        summary=str(result.get("summary", "Reviewed the available demo facts."))[:1000],
-        evidence=evidence,
-        limitations=_strings(result.get("limitations")) or ["Illustrative demo records only; no live store integration."],
-        completed_at=now,
-    )
+def _parse_specialist(_name: str, raw: str, facts: list[str]) -> dict[str, Any]:
+    result = _parse_json_object(raw)
+    return {
+        "status": "completed",
+        "summary": str(result.get("summary", "Reviewed the available demo facts."))[:1000],
+        "evidence": [line for line in _strings(result.get("evidence")) if line in facts],
+        "limitations": _strings(result.get("limitations")) or [
+            "Use only the supplied records; no external store systems are connected."
+        ],
+    }
 
 
 def _risk_requires_approval(action: str, flow: Workflow) -> bool:
@@ -122,29 +113,49 @@ def _fallback_recommendation(flow: Workflow, agent_results: list[AgentResult], f
     return title, action, priority, evidence
 
 
-def run_llm(question: str, workflow: Workflow | None = None) -> AnalysisRun:
+def run_llm(question: str, workflow: Workflow | None = None, *, products: list[dict] = PRODUCTS,
+            feedback_records: list[dict] = FEEDBACK, data_mode: str = "llm") -> AnalysisRun:
     flow = workflow or infer_workflow(question)
     run_id = str(uuid4())
     now = datetime.now(timezone.utc)
-    facts = _business_facts()
+    facts = _business_facts(products, feedback_records)
+    manager_system = (
+        "You are the Manager Agent for a small independent retailer. Integrate specialist findings into one useful, "
+        "cautious recommendation. Use only the supplied facts and agent results. Do not invent causes, forecasts, "
+        "supplier lead times, margins, campaigns, or customer segments. The output is advisory; never claim an action "
+        "was executed. Return a JSON object with string 'title', string 'action', 'priority' (high/medium/low), "
+        "array 'evidence' copied exactly from the supplied specialist evidence, and string 'confidence'."
+    )
+    execution = run_retail_analysis_flow(
+        question=question,
+        workflow=flow,
+        facts=facts,
+        agent_tasks=AGENT_TASKS,
+        manager_system=manager_system,
+        parse_specialist=_parse_specialist,
+    )
     results: dict[str, AgentResult] = {}
-    errors: list[str] = []
-
-    with ThreadPoolExecutor(max_workers=len(AGENTS)) as pool:
-        futures = {pool.submit(_run_agent, name, question, flow, facts): name for name in AGENTS}
-        for future in as_completed(futures):
-            name = futures[future]
-            try:
-                results[name] = future.result()
-            except LLMConfigurationError:
-                raise
-            except LLMRequestError:
+    errors = list(execution.specialist_errors)
+    for name in AGENTS:
+        result = execution.specialist_results.get(name)
+        completed_at = result.get("completed_at", datetime.now(timezone.utc)) if result else datetime.now(timezone.utc)
+        if not result or result.get("status") != "completed":
+            results[name] = AgentResult(
+                agent=name, status="failed", summary="This agent could not return a valid result.",
+                evidence=[], limitations=["Model response unavailable or invalid; no result was inferred."],
+                completed_at=completed_at,
+            )
+            if name not in errors:
                 errors.append(name)
-                results[name] = AgentResult(
-                    agent=name, status="failed", summary="This agent could not return a valid result.",
-                    evidence=[], limitations=["Model response unavailable or invalid; no result was inferred."],
-                    completed_at=datetime.now(timezone.utc),
-                )
+            continue
+        results[name] = AgentResult(
+            agent=name,
+            status="completed",
+            summary=result["summary"],
+            evidence=result["evidence"],
+            limitations=result["limitations"],
+            completed_at=completed_at,
+        )
 
     agents = [results[name] for name in AGENTS]
     available = [agent for agent in agents if agent.status == "completed"]
@@ -152,29 +163,17 @@ def run_llm(question: str, workflow: Workflow | None = None) -> AnalysisRun:
         raise LLMAnalysisError("All specialist agents failed to return a result. Check the provider, region, key, and model configuration.")
 
     evidence_pool = list(dict.fromkeys(line for agent in available for line in agent.evidence))
-    manager_error = False
+    manager_error = execution.manager_error
     try:
-        manager_system = (
-            "You are the Manager Agent for a small independent retailer. Integrate specialist findings into one useful, "
-            "cautious recommendation. Use only the supplied facts and agent results. Do not invent causes, forecasts, "
-            "supplier lead times, margins, campaigns, or customer segments. The output is advisory; never claim an action "
-            "was executed. Return a JSON object with string 'title', string 'action', 'priority' (high/medium/low), "
-            "array 'evidence' copied exactly from the supplied specialist evidence, and string 'confidence'."
-        )
-        manager_user = json.dumps({
-            "workflow": flow, "owner_question": question,
-            "specialist_results": [agent.model_dump(mode="json") for agent in agents],
-            "evidence_pool": evidence_pool,
-        }, ensure_ascii=False)
-        manager = _parse_json_object(chat_completion(manager_system, manager_user))
+        if not execution.manager_output:
+            raise LLMRequestError("The Manager Agent did not return a valid result.")
+        manager = _parse_json_object(execution.manager_output)
         title = str(manager.get("title", "Retail analysis recommendation"))[:180]
         action = str(manager.get("action", "Review the available evidence before taking action."))[:1200]
         priority = manager.get("priority") if manager.get("priority") in ("high", "medium", "low") else "medium"
         manager_evidence = [line for line in _strings(manager.get("evidence")) if line in evidence_pool]
         evidence = manager_evidence or evidence_pool[:5]
         confidence = str(manager.get("confidence", "Low to moderate: based on a small, seeded sample."))[:300]
-    except LLMConfigurationError:
-        raise
     except LLMRequestError:
         manager_error = True
         title, action, priority, evidence = _fallback_recommendation(flow, available, facts)
@@ -190,44 +189,48 @@ def run_llm(question: str, workflow: Workflow | None = None) -> AnalysisRun:
             if high_risk else "Advisory only; no operational change is executed."
         ),
     )
-    limitations = [
-        "All business records are illustrative seeded examples; no live store data is connected.",
-        "No cost, supplier lead-time, competitor, or campaign history is available.",
-    ]
+    limitations = (["Business records came from the configured Supabase database; they may still be synthetic demo records."]
+                   if data_mode == "supabase_llm" else
+                   ["All business records are illustrative seeded examples; no live store data is connected."])
+    limitations.append("No cost, supplier lead-time, competitor, or campaign history is available.")
     if errors:
         limitations.append("Partial analysis: unavailable agents: " + ", ".join(errors) + ".")
     if manager_error:
         limitations.append("Manager synthesis was unavailable; a conservative fallback recommendation is shown.")
     status = "completed" if not errors and not manager_error else "partial"
     return AnalysisRun(
-        id=run_id, question=question, workflow=flow, status=status, data_mode="llm",
+        id=run_id, question=question, workflow=flow, status=status, data_mode=data_mode,
         created_at=now, agents=agents, recommendations=[recommendation], limitations=limitations,
     )
 
 
-def run_demo(question: str, workflow: Workflow | None = None) -> AnalysisRun:
+def run_demo(question: str, workflow: Workflow | None = None, *, products: list[dict] = PRODUCTS,
+             feedback_records: list[dict] = FEEDBACK, data_mode: str = "demo") -> AnalysisRun:
     flow = workflow or infer_workflow(question)
     run_id = str(uuid4())
     now = datetime.now(timezone.utc)
     agents = []
     for name in AGENTS:
         evidence = []
-        summary = "Reviewed the available demo records for this workflow."
+        summary = "Reviewed the available business records for this workflow."
         if name == "Sales Agent":
-            for product in PRODUCTS:
+            for product in products:
                 diff = product["units_sold_7d"] - product["units_sold_prev_7d"]
                 evidence.append(f"{product['name']}: {diff:+} units week-over-week ({product['units_sold_7d']} vs {product['units_sold_prev_7d']}).")
-            summary = "Compared the latest 7 days with the prior 7 days using seeded sales totals."
+            summary = "Compared the latest 7 days with the prior 7 days using the available sales records."
         elif name == "Inventory Agent":
-            evidence = [f"{p['name']}: {p['stock']} units currently in demo stock." for p in PRODUCTS]
-            summary = "Checked current demo stock and estimated near-term pressure from recent unit sales."
+            evidence = [f"{p['name']}: {p['stock']} units currently in stock." for p in products]
+            summary = "Checked current stock and estimated near-term pressure from recent unit sales."
         elif name == "Pricing Agent":
-            evidence = [f"{p['name']}: listed demo price A${p['price']:.2f}. No margin or competitor data is available." for p in PRODUCTS]
-            summary = "Reviewed listed prices; the demo dataset has no cost or competitor benchmark."
+            evidence = [f"{p['name']}: listed price A${p['price']:.2f}. No margin or competitor data is available." for p in products]
+            summary = "Reviewed listed prices; no cost or competitor benchmark is available."
         else:
-            evidence = ["No live campaign-performance feed is connected."]
-            summary = "Checked available promotion context; campaign records are not included in this first slice."
-        agents.append(AgentResult(agent=name, status="completed", summary=summary, evidence=evidence, limitations=["Deterministic demo data only; no live store integration."], completed_at=now))
+            product_names = {product["id"]: product["name"] for product in products}
+            feedback_facts = [f"Customer feedback for {product_names.get(item['product_id'], 'a product')}: {item['content']}" for item in feedback_records]
+            evidence = ["No live campaign-performance feed is connected.", *feedback_facts]
+            summary = "Reviewed the available demo feedback; no campaign-performance feed is connected."
+        agent_limit = "Deterministic analysis of Supabase records; other store systems are not connected." if data_mode == "supabase" else "Deterministic demo data only; no live store integration."
+        agents.append(AgentResult(agent=name, status="completed", summary=summary, evidence=evidence, limitations=[agent_limit], completed_at=now))
 
     if flow == "overstock":
         title, action, risk = "Review Coastal Oat Biscuits clearance options", "Consider a short, low-scale bundle test and review sell-through before extending it.", False
@@ -238,12 +241,25 @@ def run_demo(question: str, workflow: Workflow | None = None) -> AnalysisRun:
     else:
         title, action, risk = "Investigate Harbour Blend Coffee sales decline", "Check whether repeated stock-outs and reduced weekly sales are connected before changing price or campaign spend.", False
 
+    coffee = next((product for product in products if product["id"] == "P-001"), products[0] if products else None)
+    recommendation_evidence = ([f"{coffee['name']} sales: {coffee['units_sold_7d']} units this week vs {coffee['units_sold_prev_7d']} last week.",
+                                f"{coffee['name']} stock: {coffee['stock']} units."] if coffee else ["No product records are available."])
+    feedback_example = next((item for item in feedback_records if item.get("product_id") == (coffee or {}).get("id")), None)
+    if feedback_example:
+        recommendation_evidence.append(f"Customer feedback: {feedback_example['content']}")
+    if flow == "feedback_analysis":
+        product_names = {product["id"]: product["name"] for product in products}
+        recommendation_evidence = [f"{product_names.get(item['product_id'], 'Product')}: {item['content']}" for item in feedback_records[:3]]
+        if not recommendation_evidence:
+            recommendation_evidence = ["No customer feedback has been submitted yet."]
     recommendation = Recommendation(
         id=str(uuid4()), title=title, priority="high" if risk else "medium", action=action,
-        evidence=["Harbour Blend Coffee sales: 21 units this week vs 34 last week.", "Harbour Blend Coffee demo stock: 12 units.", "One demo customer comment mentions two stock-outs this month."],
+        evidence=recommendation_evidence,
         confidence="Low to moderate: based on a small, seeded sample.", high_risk=risk,
         status="pending_approval" if risk else "advisory",
         approval_note="Approval records an owner decision in this prototype only. No real price, stock, or campaign action will occur." if risk else "Advisory only; no operational change is executed.",
     )
-    limitation = ["Demo records are illustrative, not live business data.", "No cost, supplier lead-time, competitor, or campaign history is connected."]
-    return AnalysisRun(id=run_id, question=question, workflow=flow, status="completed", data_mode="demo", created_at=now, agents=agents, recommendations=[recommendation], limitations=limitation)
+    limitation = (["Records were loaded from Supabase; the seeded records are illustrative, not live-store data."]
+                  if data_mode == "supabase" else ["Demo records are illustrative, not live business data."])
+    limitation.append("No cost, supplier lead-time, competitor, or campaign history is connected.")
+    return AnalysisRun(id=run_id, question=question, workflow=flow, status="completed", data_mode=data_mode, created_at=now, agents=agents, recommendations=[recommendation], limitations=limitation)

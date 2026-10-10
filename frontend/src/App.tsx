@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { Activity, ArrowDownRight, ArrowUpRight, Bell, Check, ChevronDown, CircleHelp, Clock3, Database, LayoutDashboard, MessageSquareText, Package, Play, ShieldCheck, Sparkles, Store, X } from 'lucide-react'
 
 type Agent = { agent: string; status: string; summary: string; evidence: string[]; limitations: string[] }
 type Recommendation = { id: string; title: string; priority: string; action: string; evidence: string[]; confidence: string; high_risk: boolean; status: string; approval_note: string }
+type Product = { id: string; name: string; category: string; price: number; stock: number; units_sold_7d: number; units_sold_prev_7d: number }
+type FeedbackRecord = { id: string; product_id: string; category: string; content: string; submitted_at: string }
 type Run = { id: string; question: string; workflow: string; status: string; data_mode: string; created_at: string; agents: Agent[]; recommendations: Recommendation[]; limitations: string[] }
-type Dashboard = { data_mode: string; products: { id: string; name: string; category: string; price: number; stock: number; units_sold_7d: number; units_sold_prev_7d: number }[]; feedback_count: number; runs: Run[]; audit: { id: string; event: string; summary: string; created_at: string }[] }
+type Dashboard = { data_mode: string; products: Product[]; feedback_count: number; feedback: FeedbackRecord[]; runs: Run[]; audit: { id: string; event: string; summary: string; created_at: string }[] }
 
 const scenarios = [
   { key: 'sales_decline', label: 'Sales decline', prompt: 'Why are Harbour Blend Coffee sales falling, and what should I do?' },
@@ -43,7 +45,9 @@ export default function App() {
     try { const response = await fetch('/api/dashboard'); setData(await readJson<Dashboard>(response)); setError('') }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not reach the API. Start the backend or Docker Compose, then refresh.') }
   }
-  useEffect(() => { void refresh() }, [])
+  useEffect(() => { if (window.location.pathname !== '/customer') void refresh() }, [])
+
+  if (window.location.pathname === '/customer') return <CustomerFeedbackPage />
 
   async function analyze(prompt = question, workflow?: string) {
     if (prompt.trim().length < 5) { setError('Enter a little more detail so the Manager Agent can scope the analysis.'); return }
@@ -71,20 +75,25 @@ export default function App() {
   const activeRecommendation = currentRun?.recommendations[0]
   const avgUnits = products.length ? products.reduce((sum, p) => sum + p.units_sold_7d, 0) : 0
   const approvals = currentRun?.recommendations.filter((r) => r.high_risk) ?? []
+  const supabaseMode = data?.data_mode === 'supabase' || data?.data_mode === 'supabase_llm'
+  const llmMode = data?.data_mode === 'llm' || data?.data_mode === 'supabase_llm'
+  const dataSourceTitle = supabaseMode ? (llmMode ? 'Supabase data · Qwen analysis' : 'Supabase database is active') : (llmMode ? 'Qwen analysis is active' : 'Demo data is active')
+  const dataSourceDescription = supabaseMode ? 'Products, sales and feedback are loaded from your Supabase project. Seeded business records are illustrative.' : (llmMode ? 'Qwen analyses illustrative sample records only; nothing is connected to a live store.' : 'These figures are illustrative sample records. Nothing here is connected to a live store.')
+  const dataSourceTag = supabaseMode ? (llmMode ? 'SUPABASE · QWEN' : 'SUPABASE') : (llmMode ? 'LLM · DEMO DATA' : 'LOCAL DEMO')
 
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><Store size={19} /></div><div><b>SoloRetail</b><span>AI OPERATIONS</span></div></div>
       <div className="store-switch"><div className="store-avatar">H</div><div><b>Harbour & Co.</b><span>Independent retailer</span></div><ChevronDown size={15} /></div>
       <div className="nav-label">WORKSPACE</div>
-      <nav><a className="nav-item active"><LayoutDashboard size={17}/> Overview</a><a className="nav-item"><Activity size={17}/> Agent runs <span className="nav-count">{data?.runs.length ?? 0}</span></a><a className="nav-item"><ShieldCheck size={17}/> Approvals {approvals.length > 0 && <i className="nav-dot"/>}</a><a className="nav-item"><MessageSquareText size={17}/> Customer voice</a></nav>
+      <nav><a className="nav-item active"><LayoutDashboard size={17}/> Overview</a><a className="nav-item"><Activity size={17}/> Agent runs <span className="nav-count">{data?.runs.length ?? 0}</span></a><a className="nav-item"><ShieldCheck size={17}/> Approvals {approvals.length > 0 && <i className="nav-dot"/>}</a><a className="nav-item" href="#customer-voice"><MessageSquareText size={17}/> Customer voice</a></nav>
       <div className="sidebar-bottom"><div className="help-card"><CircleHelp size={17}/><div><b>Need a hand?</b><span>View the demo guide</span></div></div><div className="profile"><div className="profile-avatar">JM</div><div><b>Jordan Mitchell</b><span>Store owner</span></div><ChevronDown size={14}/></div></div>
     </aside>
     <main className="main-area">
       <header className="topbar"><div className="breadcrumbs">Workspace <span>/</span> <b>Overview</b></div><div className="top-actions"><span className="live-pill"><i/> Demo environment</span><button className="icon-button" aria-label="Notifications"><Bell size={17}/><i/></button><div className="top-avatar">JM</div></div></header>
       <div className="page-content">
         <div className="page-heading"><div><div className="eyebrow">THURSDAY, 9 OCTOBER 2026 <span>·</span> SYDNEY, AU</div><h1>Good morning, Jordan <span>✳</span></h1><p>Here’s what’s happening across your store today.</p></div><button className="date-filter"><Clock3 size={15}/> Last 7 days <ChevronDown size={14}/></button></div>
-        <div className="demo-banner"><div className="demo-icon"><Database size={16}/></div><div><b>{data?.data_mode === 'llm' ? 'Qwen analysis is active' : 'Demo data is active'}</b><span>{data?.data_mode === 'llm' ? 'Qwen analyses illustrative sample records only; nothing is connected to a live store.' : 'These figures are illustrative sample records. Nothing here is connected to a live store.'}</span></div><span className="demo-tag">{data?.data_mode === 'llm' ? 'LLM · DEMO DATA' : 'LOCAL DEMO'}</span></div>
+        <div className="demo-banner"><div className="demo-icon"><Database size={16}/></div><div><b>{dataSourceTitle}</b><span>{dataSourceDescription}</span></div><span className="demo-tag">{dataSourceTag}</span></div>
         {error && <div className="alert error"><X size={16}/>{error}<button onClick={() => void refresh()}>Retry</button></div>}
         {notice && <div className="alert success"><Check size={16}/>{notice}<button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}
         <section className="metric-grid">
@@ -107,12 +116,18 @@ export default function App() {
         </div>
 
         <section className="panel run-panel"><div className="panel-title-row run-title"><div><div className="section-kicker">LATEST ANALYSIS</div><h2>{currentRun ? currentRun.recommendations[0]?.title : 'Your analysis workspace'}</h2></div>{currentRun && <span className={`complete-badge ${currentRun.status}`}>{currentRun.status === 'completed' ? <Check size={13}/> : <CircleHelp size={13}/>} {currentRun.status}</span>}</div>
-          {currentRun ? <><div className="run-meta"><span><span className="workflow-pill">{currentRun.workflow.replace('_',' ')}</span></span><span>Started {time(currentRun.created_at)}</span><span className="meta-dot">·</span><span>{currentRun.agents.length} specialist agents</span><span className="meta-spacer"/><span className="demo-inline"><Database size={13}/>{currentRun.data_mode === 'llm' ? 'Qwen · demo records' : 'Demo data'}</span></div>
+          {currentRun ? <><div className="run-meta"><span><span className="workflow-pill">{currentRun.workflow.replace('_',' ')}</span></span><span>Started {time(currentRun.created_at)}</span><span className="meta-dot">·</span><span>{currentRun.agents.length} specialist agents</span><span className="meta-spacer"/><span className="demo-inline"><Database size={13}/>{currentRun.data_mode === 'supabase_llm' ? 'Supabase · Qwen' : currentRun.data_mode === 'supabase' ? 'Supabase records' : currentRun.data_mode === 'llm' ? 'Qwen · demo records' : 'Demo data'}</span></div>
             <div className="agent-track">{currentRun.agents.map((a,i)=><div className="agent-step" key={a.agent}><div className={`step-icon ${a.status}`}>{a.status === 'failed' ? <X size={13}/> : <Check size={13}/>}</div>{i<currentRun.agents.length-1&&<div className="step-line"/>}<div><b>{a.agent.replace(' Agent','')}</b><span>{a.status}</span></div></div>)}</div>
             <div className="result-grid"><div className="result-summary"><div className="section-kicker">MANAGER SUMMARY</div><p>{currentRun.recommendations[0]?.action}</p><div className="evidence-list">{currentRun.recommendations[0]?.evidence.slice(0,2).map((e)=><span key={e}><Check size={13}/>{e}</span>)}</div><div className="confidence"><span>Confidence</span><b>{currentRun.recommendations[0]?.confidence}</b></div></div>
               <div className="recommendation-card"><div className="recommendation-head"><div className="recommendation-icon"><Sparkles size={16}/></div><div><span className="section-kicker">PRIORITY · {activeRecommendation?.priority.toUpperCase()}</span><b>{activeRecommendation?.title}</b></div></div><p>{activeRecommendation?.approval_note}</p>{activeRecommendation?.high_risk&&activeRecommendation.status==='pending_approval'?<div className="approval-actions"><button className="approve-button" onClick={()=>void decide(activeRecommendation,'approve')}><Check size={14}/> Approve</button><button className="reject-button" onClick={()=>void decide(activeRecommendation,'reject')}><X size={14}/> Reject</button></div>:<span className={`status-label ${activeRecommendation?.status}`}>{activeRecommendation?.status.replace('_',' ')}</span>}</div></div>
             <div className="limitations"><span><CircleHelp size={14}/><b>Limitations</b></span>{currentRun.limitations.join(' ')}</div>
           </> : <div className="run-empty"><div className="empty-orbit"><Sparkles size={20}/></div><div><b>Your agents are ready when you are.</b><span>Start a workflow above to see a transparent, evidence-led analysis with approval controls.</span></div></div>}
+        </section>
+
+        <section className="panel customer-voice-panel" id="customer-voice">
+          <div className="panel-title-row"><div><div className="section-kicker">CUSTOMER VOICE · {data?.feedback_count ?? 0} RECORDS</div><h2>Recent customer feedback</h2></div><div className="feedback-actions"><button className="text-button" disabled={busy} onClick={()=>void analyze(scenarios[3].prompt,'feedback_analysis')}>Analyze feedback <ArrowUpRight size={13}/></button><a className="text-button" href="/customer">Open customer form <ArrowUpRight size={13}/></a></div></div>
+          <p className="feedback-privacy">Demo inbox. Contact details such as email addresses and phone numbers are masked before storage. Avoid entering names, addresses, or payment details.</p>
+          <div className="feedback-list">{(data?.feedback ?? []).slice(0,4).map((item)=>{const product=products.find((p)=>p.id===item.product_id);return <article className="feedback-item" key={item.id}><div><b>{product?.name ?? 'Product feedback'}</b><span>{item.category} · {new Date(item.submitted_at).toLocaleDateString('en-AU')}</span></div><p>{item.content}</p></article>})}{!data?.feedback?.length&&<div className="audit-empty">No feedback has been submitted yet.</div>}</div>
         </section>
 
         <div className="bottom-grid"><section className="panel inventory-panel"><div className="panel-title-row"><div><div className="section-kicker">PRODUCT SNAPSHOT</div><h2>Inventory & sales</h2></div><button className="text-button">All products <ArrowUpRight size={13}/></button></div><div className="table-wrap"><table><thead><tr><th>PRODUCT</th><th>PRICE</th><th>IN STOCK</th><th>7D SALES</th><th>VS LAST WEEK</th></tr></thead><tbody>{products.map(p=><tr key={p.id}><td><div className="table-product"><span className="table-emoji">{p.category==='Wellness'?'✳':'◉'}</span><span><b>{p.name}</b><small>{p.category}</small></span></div></td><td>{money(p.price)}</td><td><span className={`stock-badge ${p.stock<15?'low':''}`}>{p.stock} units</span></td><td>{p.units_sold_7d} units</td><td><span className={`change-text ${p.units_sold_7d<p.units_sold_prev_7d?'down':'up'}`}>{p.units_sold_7d<p.units_sold_prev_7d?<ArrowDownRight size={13}/>:<ArrowUpRight size={13}/>} {Math.round(Math.abs((p.units_sold_7d-p.units_sold_prev_7d)/Math.max(1,p.units_sold_prev_7d))*100)}%</span></td></tr>)}</tbody></table></div></section>
@@ -124,3 +139,83 @@ export default function App() {
 }
 
 function Metric({title,value,change,note,icon,tone,down}:{title:string;value:string;change:string;note:string;icon:string;tone:string;down?:boolean}) { return <div className="metric-card"><div className="metric-top"><span>{title}</span><i className={`metric-icon ${tone}`}>{icon}</i></div><strong>{value}</strong><div className="metric-foot"><span className={down?'metric-down':'metric-up'}>{down?<ArrowDownRight size={13}/>:<ArrowUpRight size={13}/>} {change}</span><span>{note}</span></div></div> }
+
+
+function CustomerFeedbackPage() {
+  const [products, setProducts] = useState<Product[]>([])
+  const [customerQuestion, setCustomerQuestion] = useState('')
+  const [qaBusy, setQaBusy] = useState(false)
+  const [qaError, setQaError] = useState('')
+  const [qaResult, setQaResult] = useState<{ answer: string; evidence: string[]; limitations: string[] } | null>(null)
+  const [productId, setProductId] = useState('')
+  const [category, setCategory] = useState<'product' | 'service' | 'complaint'>('product')
+  const [content, setContent] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+
+  useEffect(() => {
+    void fetch('/api/customer/products')
+      .then((response) => readJson<{ products: Product[] }>(response))
+      .then((body) => { setProducts(body.products); setProductId(body.products[0]?.id ?? '') })
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load the product list.'))
+  }, [])
+
+  async function ask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setQaBusy(true); setQaError(''); setQaResult(null)
+    try {
+      const response = await fetch('/api/customer/ask', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: customerQuestion }),
+      })
+      const body = await readJson<{ answer: string; evidence: string[]; limitations: string[] }>(response)
+      setQaResult(body)
+    } catch (e) { setQaError(e instanceof Error ? e.message : 'Could not answer that question.') }
+    finally { setQaBusy(false) }
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setBusy(true); setError(''); setSuccess('')
+    try {
+      const response = await fetch('/api/customer/feedback', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ product_id: productId, category, content }),
+      })
+      const body = await readJson<{ contact_was_masked: boolean; message: string }>(response)
+      setSuccess(body.contact_was_masked ? `${body.message} Email or phone details were masked before saving.` : body.message)
+      setContent('')
+    } catch (e) { setError(e instanceof Error ? e.message : 'Feedback could not be submitted.') }
+    finally { setBusy(false) }
+  }
+
+  return <main className="customer-page">
+    <header className="customer-header"><a className="customer-brand" href="/"><span className="brand-mark"><Store size={19}/></span><span><b>SoloRetail</b><small>HARBOUR & CO.</small></span></a><a className="text-button" href="/">Store owner dashboard <ArrowUpRight size={13}/></a></header>
+    <section className="customer-card customer-qa-card">
+      <div className="section-kicker"><Package size={14}/> CUSTOMER HELP</div>
+      <h1>Ask about products</h1>
+      <p className="customer-intro">Ask about product details, price, stock, or current promotions. Answers use the store records available now.</p>
+      <form className="customer-qa-form" onSubmit={(event)=>void ask(event)}>
+        <label>Your question<textarea required minLength={3} maxLength={500} rows={2} value={customerQuestion} onChange={(event)=>setCustomerQuestion(event.target.value)} placeholder="e.g. How much is Harbour Blend Coffee?" /></label>
+        <div className="feedback-form-footer"><span>Store policy details are only answered when configured.</span><button className="primary-button" disabled={qaBusy}>{qaBusy ? 'Looking up…' : 'Ask question'}</button></div>
+      </form>
+      {qaError && <div className="alert error"><X size={16}/>{qaError}</div>}
+      {qaResult && <div className="customer-answer"><b>Answer</b><p>{qaResult.answer}</p>{qaResult.evidence.length > 0 && <div className="customer-answer-evidence"><span>Based on store records</span>{qaResult.evidence.map((item)=><small key={item}>{item}</small>)}</div>}{qaResult.limitations.map((item)=><small className="customer-answer-limit" key={item}>{item}</small>)}</div>}
+    </section>
+    <section className="customer-card">
+      <div className="section-kicker"><MessageSquareText size={14}/> CUSTOMER VOICE</div>
+      <h1>Share your feedback</h1>
+      <p className="customer-intro">Tell Harbour & Co. about a product or service. Your feedback helps the store improve.</p>
+      <div className="customer-notice"><ShieldCheck size={16}/><span>This is a demonstration form. Do not enter names, addresses, payment details, or other sensitive information. Email addresses and phone numbers are masked before the feedback is stored.</span></div>
+      {error && <div className="alert error"><X size={16}/>{error}</div>}
+      {success && <div className="alert success"><Check size={16}/>{success}</div>}
+      <form className="feedback-form" onSubmit={(event)=>void submit(event)}>
+        <label>Product<select required value={productId} onChange={(event)=>setProductId(event.target.value)}>{products.map((product)=><option key={product.id} value={product.id}>{product.name}</option>)}</select></label>
+        <label>Feedback type<select value={category} onChange={(event)=>setCategory(event.target.value as typeof category)}><option value="product">Product</option><option value="service">Service</option><option value="complaint">Complaint</option></select></label>
+        <label>Your feedback<textarea required minLength={5} maxLength={2000} rows={6} value={content} onChange={(event)=>setContent(event.target.value)} placeholder="What would you like the store to know?" /></label>
+        <div className="feedback-form-footer"><span>{content.length}/2000 characters · email/phone masking runs before storage</span><button className="primary-button" disabled={busy || !products.length}>{busy ? 'Submitting…' : 'Submit feedback'}</button></div>
+      </form>
+    </section>
+  </main>
+}
