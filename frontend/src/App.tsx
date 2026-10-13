@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Activity, ArrowDownRight, ArrowUpRight, Bell, Check, ChevronDown, CircleHelp, Clock3, Database, LayoutDashboard, LogOut, Menu, MessageSquareText, Package, Play, ShieldCheck, Sparkles, Store, X } from 'lucide-react'
+import { Activity, ArrowDownRight, ArrowUpRight, Bell, Check, ChevronDown, CircleHelp, Clock3, Database, LayoutDashboard, LogOut, Menu, MessageSquareText, Package, Play, ShieldCheck, ShoppingBag, Sparkles, X } from 'lucide-react'
 
 type Agent = { agent: string; status: string; summary: string; evidence: string[]; limitations: string[] }
 type Recommendation = { id: string; title: string; priority: string; action: string; evidence: string[]; confidence: string; high_risk: boolean; status: string; approval_note: string }
@@ -47,12 +47,14 @@ export default function App() {
   const [error, setError] = useState('')
   const [simulateFailure, setSimulateFailure] = useState(false)
   const [activeSection, setActiveSection] = useState<WorkspaceSection>('overview')
+  const [hoveredSection, setHoveredSection] = useState<WorkspaceSection | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [authReady, setAuthReady] = useState(false)
   const [authRequired, setAuthRequired] = useState(false)
   const [session, setSession] = useState<OwnerSession | null>(null)
   const [authError, setAuthError] = useState('')
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  const [currentTime, setCurrentTime] = useState(() => new Date())
   const [analysisProductId, setAnalysisProductId] = useState('')
   const [feedbackProductFilter, setFeedbackProductFilter] = useState('all')
   const [feedbackCategoryFilter, setFeedbackCategoryFilter] = useState('all')
@@ -74,6 +76,11 @@ export default function App() {
     if (token) headers.set('Authorization', `Bearer ${token}`)
     return fetch(input, { ...init, headers })
   }
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setCurrentTime(new Date()), 60_000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   async function refresh() {
     try { const response = await ownerFetch('/api/dashboard'); setData(await readJson<Dashboard>(response)); setError('') }
@@ -164,6 +171,8 @@ export default function App() {
   const dataSourceDescription = supabaseMode ? 'Products, sales and feedback are loaded from your Supabase project. Seeded business records are illustrative.' : (llmMode ? 'Qwen analyses illustrative sample records only; nothing is connected to a live store.' : 'These figures are illustrative sample records. Nothing here is connected to a live store.')
   const dataSourceTag = supabaseMode ? (llmMode ? 'SUPABASE · QWEN' : 'SUPABASE') : (llmMode ? 'LLM · DEMO DATA' : 'LOCAL DEMO')
   const sectionTitle: Record<WorkspaceSection, string> = { overview: 'Overview', 'agent-runs': 'Agent runs', approvals: 'Approvals', 'customer-voice': 'Customer voice' }
+  const greeting = currentTime.getHours() < 12 ? 'Good morning' : currentTime.getHours() < 18 ? 'Good afternoon' : 'Good evening'
+  const ownerFirstName = (session?.name ?? 'Jordan').split(' ')[0]
   const maxSales = Math.max(...products.map((product) => product.units_sold_7d), 1)
   const visibleFeedback = (data?.feedback ?? []).filter((item) => (feedbackProductFilter === 'all' || item.product_id === feedbackProductFilter) && (feedbackCategoryFilter === 'all' || item.category === feedbackCategoryFilter) && (!feedbackOnlyEscalated || escalatedFeedback.has(item.id)))
 
@@ -191,25 +200,24 @@ export default function App() {
   if (authRequired && !session) return <LoginPage error={authError} onSubmit={signIn} />
 
   return <div className={`app-shell ${sidebarOpen ? '' : 'sidebar-collapsed'}`}>
-    <aside className="sidebar">
-      <div className="brand"><div className="brand-mark"><Store size={19} /></div><div><b>SoloRetail</b><span>AI OPERATIONS</span></div></div>
-      <div className="store-switch"><div className="store-avatar">H</div><div><b>Harbour & Co.</b><span>Independent retailer</span></div><ChevronDown size={15} /></div>
+    <aside className={`sidebar ${hoveredSection ? 'sidebar-previewing' : ''}`}>
+      <div className="brand"><div className="brand-mark"><ShoppingBag size={19} /></div><div><b>SoloRetail</b><span>AI OPERATIONS</span></div></div>
       <div className="nav-label">WORKSPACE</div>
-      <nav>
-        <button className={`nav-item ${activeSection === 'overview' ? 'active' : ''}`} onClick={() => openSection('overview')}><LayoutDashboard size={17}/> Overview</button>
-        <button className={`nav-item ${activeSection === 'agent-runs' ? 'active' : ''}`} onClick={() => openSection('agent-runs')}><Activity size={17}/> Agent runs <span className="nav-count">{allRuns.length}</span></button>
-        <button className={`nav-item ${activeSection === 'approvals' ? 'active' : ''}`} onClick={() => openSection('approvals')}><ShieldCheck size={17}/> Approvals {approvals.length > 0 && <i className="nav-dot"/>}</button>
-        <button className={`nav-item ${activeSection === 'customer-voice' ? 'active' : ''}`} onClick={() => openSection('customer-voice')}><MessageSquareText size={17}/> Customer voice</button>
+      <nav onMouseLeave={() => setHoveredSection(null)}>
+        <button className={`nav-item ${activeSection === 'overview' ? 'active' : ''} ${hoveredSection === 'overview' ? 'hovered' : ''}`} onMouseEnter={() => setHoveredSection('overview')} onClick={() => openSection('overview')}><LayoutDashboard size={17}/> Overview</button>
+        <button className={`nav-item ${activeSection === 'agent-runs' ? 'active' : ''} ${hoveredSection === 'agent-runs' ? 'hovered' : ''}`} onMouseEnter={() => setHoveredSection('agent-runs')} onClick={() => openSection('agent-runs')}><Activity size={17}/> Agent runs <span className="nav-count">{allRuns.length}</span></button>
+        <button className={`nav-item ${activeSection === 'approvals' ? 'active' : ''} ${hoveredSection === 'approvals' ? 'hovered' : ''}`} onMouseEnter={() => setHoveredSection('approvals')} onClick={() => openSection('approvals')}><ShieldCheck size={17}/> Approvals {approvals.length > 0 && <i className="nav-dot"/>}</button>
+        <button className={`nav-item ${activeSection === 'customer-voice' ? 'active' : ''} ${hoveredSection === 'customer-voice' ? 'hovered' : ''}`} onMouseEnter={() => setHoveredSection('customer-voice')} onClick={() => openSection('customer-voice')}><MessageSquareText size={17}/> Customer voice</button>
       </nav>
       <div className="sidebar-bottom"><button className="help-card" onClick={()=>setNotice('Demo guide: choose a workflow, inspect evidence and limitations, then approve or reject only high-risk recommendations.')}><CircleHelp size={17}/><div><b>Need a hand?</b><span>View the demo guide</span></div></button><div className="profile-wrap"><button className="profile" onClick={() => setAccountMenuOpen((open) => !open)} aria-expanded={accountMenuOpen}><div className="profile-avatar">JM</div><div><b>{session?.name ?? 'Jordan Mitchell'}</b><span>{session?.role ?? 'Store owner'}</span></div><ChevronDown size={14}/></button>{accountMenuOpen && <div className="account-menu"><b>{session?.name ?? 'Jordan Mitchell'}</b><span>{authRequired ? session?.email : 'Local prototype access'}</span>{authRequired ? <button onClick={() => void signOut()}><LogOut size={14}/> Sign out</button> : <small>Set `AUTH_REQUIRED=true` to enable owner sign-in.</small>}</div>}</div></div>
     </aside>
     <main className="main-area">
-      <header className="topbar"><div className="topbar-left"><button className="sidebar-toggle" aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} title={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} onClick={() => setSidebarOpen((open) => !open)}><Menu size={18}/></button><div className="breadcrumbs">Workspace <span>/</span> <b>{sectionTitle[activeSection]}</b></div></div><div className="top-actions"><span className="live-pill"><i/> {supabaseMode ? 'Supabase environment' : 'Demo environment'}</span><button className="icon-button" aria-label="Notifications" onClick={()=>setNotice(`${approvals.length} high-risk recommendation${approvals.length === 1 ? '' : 's'} awaiting owner review.`)}><Bell size={17}/><i/></button><div className="top-avatar">JM</div></div></header>
+      <header className="topbar"><div className="topbar-left"><button className="sidebar-toggle" aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} title={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} onClick={() => setSidebarOpen((open) => !open)}><Menu size={18}/></button><div className="breadcrumbs">Workspace <span>/</span> <b>{sectionTitle[activeSection]}</b></div></div><div className="top-actions"><span className="live-pill"><i/> {supabaseMode ? 'Supabase environment' : 'Demo environment'}</span><div className="store-switch top-store-switch"><div className="store-avatar">H</div><div><b>Harbour & Co.</b><span>Independent retailer</span></div></div><button className="icon-button" aria-label="Notifications" onClick={()=>setNotice(approvals.length ? `${approvals.length} high-risk recommendation${approvals.length === 1 ? '' : 's'} awaiting owner review.` : 'No high-risk recommendations are awaiting owner review.')}><Bell size={17}/>{approvals.length > 0 && <i/>}</button><div className="top-avatar">JM</div></div></header>
       <div className={`page-content module-${activeSection}`}>
         {error && <div className="alert error"><X size={16}/>{error}<button onClick={() => void refresh()}>Retry</button></div>}
         {notice && <div className="alert success"><Check size={16}/>{notice}<button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}
         <div className="workspace-module overview-module">
-        <div className="page-heading" id="overview"><div><div className="eyebrow">STORE OPERATIONS <span>·</span> SYDNEY, AU</div><h1>Good morning, Jordan <span>✳</span></h1><p>Here’s what’s happening across your store today.</p></div><button className="date-filter" onClick={()=>setNotice('All sales comparisons use the latest 7 days against the preceding 7 days.')}><Clock3 size={15}/> Last 7 days <ChevronDown size={14}/></button></div>
+        <div className="page-heading" id="overview"><div><div className="eyebrow">STORE OPERATIONS <span>·</span> SYDNEY, AU</div><h1>{greeting}, {ownerFirstName} <span>✳</span></h1><p>Here’s what’s happening across your store today.</p></div><button className="date-filter" onClick={()=>setNotice('All sales comparisons use the latest 7 days against the preceding 7 days.')}><Clock3 size={15}/> Last 7 days <ChevronDown size={14}/></button></div>
         <div className="demo-banner"><div className="demo-icon"><Database size={16}/></div><div><b>{dataSourceTitle}</b><span>{dataSourceDescription}</span></div><span className="demo-tag">{dataSourceTag}</span></div>
         <section className="metric-grid">
           <Metric title="Sales · last 7 days" value={money(currentRevenue)} change={`${Math.abs(revenueChange)}%`} down={revenueChange < 0} note="vs previous 7 days" icon="↘" tone="sage"/>
@@ -271,7 +279,7 @@ export default function App() {
 function Metric({title,value,change,note,icon,tone,down}:{title:string;value:string;change:string;note:string;icon:string;tone:string;down?:boolean}) { return <div className="metric-card"><div className="metric-top"><span>{title}</span><i className={`metric-icon ${tone}`}>{icon}</i></div><strong>{value}</strong><div className="metric-foot"><span className={down?'metric-down':'metric-up'}>{down?<ArrowDownRight size={13}/>:<ArrowUpRight size={13}/>} {change}</span><span>{note}</span></div></div> }
 
 function AuthLoading() {
-  return <main className="auth-page"><div className="auth-card auth-loading"><span className="brand-mark"><Store size={20}/></span><b>Preparing your owner workspace…</b></div></main>
+  return <main className="auth-page"><div className="auth-card auth-loading"><span className="brand-mark"><ShoppingBag size={20}/></span><b>Preparing your owner workspace…</b></div></main>
 }
 
 function LoginPage({ error, onSubmit }: { error: string; onSubmit: (email: string, password: string) => Promise<void> }) {
@@ -286,7 +294,7 @@ function LoginPage({ error, onSubmit }: { error: string; onSubmit: (email: strin
     finally { setBusy(false) }
   }
 
-  return <main className="auth-page"><section className="auth-card"><div className="brand-mark"><Store size={20}/></div><div className="section-kicker">OWNER ACCESS</div><h1>Welcome back</h1><p>Sign in to view Harbour &amp; Co. operations and approve recommendations.</p>{error && <div className="alert error"><X size={16}/>{error}</div>}<form className="login-form" onSubmit={(event) => void submit(event)}><label>Email<input required type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label><label>Password<input required type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Your owner password" /></label><button className="primary-button login-button" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button></form><small>Your local owner session expires after 8 hours or when you sign out.</small></section></main>
+  return <main className="auth-page"><section className="auth-card"><div className="brand-mark"><ShoppingBag size={20}/></div><div className="section-kicker">OWNER ACCESS</div><h1>Welcome back</h1><p>Sign in to view Harbour &amp; Co. operations and approve recommendations.</p>{error && <div className="alert error"><X size={16}/>{error}</div>}<form className="login-form" onSubmit={(event) => void submit(event)}><label>Email<input required type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label><label>Password<input required type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Your owner password" /></label><button className="primary-button login-button" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button></form><small>Your local owner session expires after 8 hours or when you sign out.</small></section></main>
 }
 
 
@@ -340,7 +348,7 @@ function CustomerFeedbackPage() {
   }
 
   return <main className="customer-page">
-    <header className="customer-header"><a className="customer-brand" href="/"><span className="brand-mark"><Store size={19}/></span><span><b>SoloRetail</b><small>HARBOUR & CO.</small></span></a><a className="text-button" href="/">Store owner dashboard <ArrowUpRight size={13}/></a></header>
+    <header className="customer-header"><a className="customer-brand" href="/"><span className="brand-mark"><ShoppingBag size={19}/></span><span><b>SoloRetail</b><small>HARBOUR & CO.</small></span></a><a className="text-button" href="/">Store owner dashboard <ArrowUpRight size={13}/></a></header>
     <section className="customer-card customer-qa-card">
       <div className="section-kicker"><Package size={14}/> CUSTOMER HELP</div>
       <h1>Ask about products</h1>
