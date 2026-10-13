@@ -113,6 +113,33 @@ def load_active_promotions() -> list[dict[str, Any]]:
                  order="ends_at.asc", limit=50)
 
 
+def load_inventory_movements(limit: int = 25) -> list[dict[str, Any]]:
+    products = {row["id"]: row["name"] for row in _rows("products", "id,name")}
+    movements = _rows("inventory_movements", "id,product_id,movement_type,quantity,occurred_at,note", order="occurred_at.desc", limit=limit)
+    return [{**movement, "product_name": products.get(movement["product_id"], movement["product_id"])} for movement in movements]
+
+
+def record_inventory_movement(record: dict[str, Any]) -> dict[str, Any]:
+    rows = _rows("inventory_levels", "product_id,quantity", filters={"product_id": f"eq.{record['product_id']}"}, limit=1)
+    if not rows:
+        raise KeyError("Product inventory level not found.")
+    delta = int(record["quantity"]) if record["movement_type"] == "receipt" else -int(record["quantity"])
+    updated_quantity = int(rows[0]["quantity"]) + delta
+    if updated_quantity < 0:
+        raise ValueError("This write-off would make inventory negative.")
+    inserted = _request("inventory_movements", method="POST", payload={
+        "product_id": record["product_id"], "movement_type": record["movement_type"], "quantity": delta,
+        "note": record.get("note", ""),
+    }, prefer="return=representation")
+    _request("inventory_levels", method="PATCH", query={"product_id": f"eq.{record['product_id']}"},
+             payload={"quantity": updated_quantity, "updated_at": datetime.now(timezone.utc)})
+    if not isinstance(inserted, list) or not inserted:
+        raise SupabaseError("Supabase did not confirm that the inventory movement was saved.")
+    movement = {**inserted[0], "updated_stock": updated_quantity}
+    write_audit("inventory_movement_recorded", f"Recorded {record['movement_type']} of {record['quantity']} units.")
+    return movement
+
+
 def create_feedback(record: dict[str, Any]) -> dict[str, Any]:
     rows = _request("customer_feedback", method="POST", payload={
         "product_id": record["product_id"], "category": record["category"], "content": record["content"],
@@ -161,6 +188,7 @@ def load_audit(limit: int = 50) -> list[dict[str, Any]]:
     rows = _rows("audit_logs", "id,run_id,event,details,created_at", order="created_at.desc", limit=limit)
     return [{"id": row["id"], "run_id": row.get("run_id"), "event": row["event"],
              "recommendation_id": row.get("details", {}).get("recommendation_id"),
+             "feedback_id": row.get("details", {}).get("feedback_id"),
              "summary": row.get("details", {}).get("summary", row["event"]),
              "created_at": row["created_at"]} for row in rows]
 

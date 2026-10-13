@@ -9,6 +9,7 @@ SpecialistName = Literal["Sales Agent", "Inventory Agent", "Pricing Agent", "Mar
 class AnalyzeRequest(BaseModel):
     question: str = Field(min_length=5, max_length=1000)
     workflow: Workflow | None = None
+    product_id: str | None = Field(default=None, min_length=2, max_length=50)
     # This is deliberately a demonstration control: it makes resilience and partial
     # results observable without disconnecting a real model provider.
     simulate_failures: list[SpecialistName] = Field(default_factory=list, max_length=4)
@@ -45,12 +46,25 @@ class AnalysisRun(BaseModel):
     agents: list[AgentResult]
     recommendations: list[Recommendation]
     limitations: list[str]
+    scope: dict[str, str] = Field(default_factory=dict)
 
 
 class DecisionRequest(BaseModel):
     decision: Literal["approve", "reject"]
     note: str = Field(default="", max_length=500)
 
+
+class OwnerLogin(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=1024)
+
+    @field_validator("email")
+    @classmethod
+    def trim_email(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Enter an email address.")
+        return trimmed
 
 
 class FeedbackSubmission(BaseModel):
@@ -65,6 +79,22 @@ class FeedbackSubmission(BaseModel):
         if not trimmed:
             raise ValueError("This field cannot be blank.")
         return trimmed
+
+
+class FeedbackEscalation(BaseModel):
+    note: str = Field(default="", max_length=500)
+
+
+class InventoryMovementSubmission(BaseModel):
+    product_id: str = Field(min_length=2, max_length=50)
+    movement_type: Literal["receipt", "write_off"]
+    quantity: int = Field(gt=0, le=100000)
+    note: str = Field(default="", max_length=500)
+
+    @field_validator("product_id", "note")
+    @classmethod
+    def trim_movement_text(cls, value: str) -> str:
+        return value.strip()
 
 
 class CustomerQuestion(BaseModel):

@@ -1,7 +1,7 @@
 import unittest
 
 from app.demo_data import FEEDBACK, PRODUCTS
-from app.insights import feedback_insights, product_indicators
+from app.insights import classify_feedback, feedback_insights, product_indicators
 from app.orchestrator import run_demo
 
 
@@ -37,6 +37,13 @@ class DemoAnalysisTests(unittest.TestCase):
         self.assertEqual(products["P-003"]["risk"], "stock_out")
         self.assertIsNotNone(products["P-001"]["estimated_cover_days"])
         self.assertGreater(feedback["theme_counts"]["availability"], 0)
+
+    def test_feedback_triage_is_explainable(self):
+        triage = classify_feedback({"id": "F-test", "content": "I want a refund because this was out of stock."})
+
+        self.assertEqual(triage["priority"], "high")
+        self.assertEqual(triage["sentiment"], "negative")
+        self.assertIn("availability", triage["themes"])
 
 
 if __name__ == "__main__":

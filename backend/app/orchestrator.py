@@ -252,21 +252,36 @@ def run_demo(question: str, workflow: Workflow | None = None, *, products: list[
         agent_limit = "Deterministic analysis of Supabase records; other store systems are not connected." if data_mode == "supabase" else "Deterministic demo data only; no live store integration."
         agents.append(AgentResult(agent=name, status="completed", summary=summary, evidence=evidence, limitations=[agent_limit], completed_at=now))
 
+    if not products:
+        raise ValueError("At least one product record is required for analysis.")
+    spike_product = max(products, key=lambda product: (product["units_sold_7d"] - product["units_sold_prev_7d"]) / max(product["units_sold_prev_7d"], 1))
+    decline_product = min(products, key=lambda product: (product["units_sold_7d"] - product["units_sold_prev_7d"]) / max(product["units_sold_prev_7d"], 1))
+    overstock_product = max(products, key=lambda product: product["stock"] / max(product["units_sold_7d"], 1))
+    feedback_product_id = next((item.get("product_id") for item in feedback_records if item.get("product_id")), decline_product["id"])
+    feedback_product = next((product for product in products if product["id"] == feedback_product_id), decline_product)
     if flow == "overstock":
-        title, action, risk = "Review Coastal Oat Biscuits clearance options", "Consider a short, low-scale bundle test and review sell-through before extending it.", False
+        title, action, risk = f"Review {overstock_product['name']} clearance options", f"Consider a short, low-scale bundle test for {overstock_product['name']} and review sell-through before extending it. Do not change price without margin approval.", False
     elif flow == "demand_spike":
-        title, action, risk = "Protect Wattle Hand Balm availability", "Check supplier lead time and prepare a replenishment plan; pause any broad promotion until stock cover is confirmed.", True
+        title, action, risk = f"Protect {spike_product['name']} availability", f"Check supplier lead time and prepare a replenishment plan for {spike_product['name']}; pause any broad promotion until stock cover is confirmed.", True
     elif flow == "feedback_analysis":
-        title, action, risk = "Investigate availability feedback", "Review repeat stock-out reports for Harbour Blend Coffee and confirm shelf replenishment practices.", False
+        title, action, risk = f"Investigate {feedback_product['name']} feedback", f"Review the available feedback for {feedback_product['name']} and confirm the relevant product, shelf, service, or price process before replying or changing operations.", False
     else:
-        title, action, risk = "Investigate Harbour Blend Coffee sales decline", "Check whether repeated stock-outs and reduced weekly sales are connected before changing price or campaign spend.", False
+        title, action, risk = f"Investigate {decline_product['name']} sales movement", f"Check whether stock availability and the change in {decline_product['name']} weekly sales are connected before changing price or campaign spend.", False
 
-    coffee = next((product for product in products if product["id"] == "P-001"), products[0] if products else None)
-    recommendation_evidence = ([f"{coffee['name']} sales: {coffee['units_sold_7d']} units this week vs {coffee['units_sold_prev_7d']} last week.",
-                                f"{coffee['name']} stock: {coffee['stock']} units."] if coffee else ["No product records are available."])
-    feedback_example = next((item for item in feedback_records if item.get("product_id") == (coffee or {}).get("id")), None)
+    focus_product = overstock_product if flow == "overstock" else feedback_product if flow == "feedback_analysis" else decline_product
+    recommendation_evidence = [f"{focus_product['name']} sales: {focus_product['units_sold_7d']} units this week vs {focus_product['units_sold_prev_7d']} last week.",
+                               f"{focus_product['name']} stock: {focus_product['stock']} units."]
+    feedback_example = next((item for item in feedback_records if item.get("product_id") == focus_product["id"]), None)
     if feedback_example:
         recommendation_evidence.append(f"Customer feedback: {feedback_example['content']}")
+    if flow == "demand_spike":
+        recommendation_evidence = [
+            f"{spike_product['name']} sales: {spike_product['units_sold_7d']} units this week vs {spike_product['units_sold_prev_7d']} last week.",
+            f"{spike_product['name']} stock: {spike_product['stock']} units.",
+        ]
+        spike_feedback = next((item for item in feedback_records if item.get("product_id") == spike_product["id"]), None)
+        if spike_feedback:
+            recommendation_evidence.append(f"Customer feedback: {spike_feedback['content']}")
     if flow == "feedback_analysis":
         product_names = {product["id"]: product["name"] for product in products}
         recommendation_evidence = [f"{product_names.get(item['product_id'], 'Product')}: {item['content']}" for item in feedback_records[:3]]

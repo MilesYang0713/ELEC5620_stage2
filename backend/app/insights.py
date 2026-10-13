@@ -12,6 +12,16 @@ THEMES = {
 }
 POSITIVE_TERMS = ("love", "great", "good", "helpful", "excellent", "喜欢", "很好")
 NEGATIVE_TERMS = ("out of stock", "complaint", "bad", "poor", "small", "expensive", "缺货", "投诉", "不好")
+URGENT_TERMS = ("out of stock", "refund", "unsafe", "allergic", "complaint", "缺货", "退款", "过敏", "投诉")
+
+
+def classify_feedback(feedback: dict[str, Any]) -> dict[str, Any]:
+    """A transparent triage label, not an automated customer-service decision."""
+    text = str(feedback.get("content", "")).casefold()
+    themes = [theme for theme, terms in THEMES.items() if any(term in text for term in terms)] or ["other"]
+    sentiment = "negative" if any(term in text for term in NEGATIVE_TERMS) else "positive" if any(term in text for term in POSITIVE_TERMS) else "neutral"
+    priority = "high" if any(term in text for term in URGENT_TERMS) else "normal"
+    return {"id": str(feedback.get("id", "")), "themes": themes, "sentiment": sentiment, "priority": priority}
 
 
 def product_indicators(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -40,14 +50,10 @@ def product_indicators(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def feedback_insights(feedback_records: list[dict[str, Any]]) -> dict[str, Any]:
     themes: Counter[str] = Counter()
     sentiment: Counter[str] = Counter()
+    classifications = []
     for feedback in feedback_records:
-        text = str(feedback.get("content", "")).casefold()
-        matched = [theme for theme, terms in THEMES.items() if any(term in text for term in terms)]
-        themes.update(matched or ["other"])
-        if any(term in text for term in NEGATIVE_TERMS):
-            sentiment["negative"] += 1
-        elif any(term in text for term in POSITIVE_TERMS):
-            sentiment["positive"] += 1
-        else:
-            sentiment["neutral"] += 1
-    return {"theme_counts": dict(themes), "sentiment_counts": dict(sentiment), "record_count": len(feedback_records)}
+        classification = classify_feedback(feedback)
+        classifications.append(classification)
+        themes.update(classification["themes"])
+        sentiment[classification["sentiment"]] += 1
+    return {"theme_counts": dict(themes), "sentiment_counts": dict(sentiment), "record_count": len(feedback_records), "classifications": classifications}

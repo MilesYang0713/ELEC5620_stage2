@@ -1,6 +1,6 @@
 # ELEC5620_stage2 — SoloRetail AI
 
-Proof-of-concept for ELEC5620 Stage 2, based on the group's Stage 1 report. This first scaffold provides a runnable demo-mode vertical slice: owner dashboard → workflow selection → observable specialist-agent results → advisory recommendations → approval decision and audit entry. It does not perform real price, inventory, or marketing actions.
+Proof-of-concept for ELEC5620 Stage 2, based on the group's Stage 1 report. It provides a runnable vertical slice: owner dashboard → workflow selection → observable specialist-agent results → advisory recommendations → approval decision and audit entry. It never performs a real price, supplier, customer, or marketing action automatically.
 
 ## Requirements mapping
 
@@ -13,6 +13,10 @@ Proof-of-concept for ELEC5620 Stage 2, based on the group's Stage 1 report. This
 | Agent failures/partial results | Agent result model carries state, detail, and limitation; failure injection is a follow-up slice |
 | Audit and timestamp traceability | In-memory audit entries for demo analysis and approval decisions |
 | Customer enquiries and feedback | `/customer` product/price/stock/promotion lookup and feedback form; answers are record-grounded, feedback is validated and contact details masked |
+| Iterative owner scoping | Optional product scope in the analysis composer; the saved run identifies the narrowed evidence set |
+| Inventory movements | Owner-only receipt/write-off form changes the selected inventory level and creates a timestamped movement/audit record |
+| Feedback triage | Product/category filters, explainable theme/sentiment/priority labels, and a manual-review audit action; no reply is sent automatically |
+| Explainable dashboard | 7-day product-sales comparison bars, stock cover indicators, visible evidence and limitations |
 | Agile collaboration and contribution | No Jira history or member contributions are fabricated; group members should add actual records/statements |
 
 ## Stack and structure
@@ -65,7 +69,9 @@ The Vite development server proxies `/api` to `http://localhost:8000`.
 2. Start the analysis and follow each specialist agent's status and evidence.
 3. Review the advisory recommendation, supporting data, uncertainty, and approval label.
 4. Approve or reject a high-risk recommendation. The audit feed records the decision and time; the UI explicitly says no external business action occurred.
-5. The four Stage 1 flows are represented by sales decline, overstock, demand spike, and customer feedback. The initial deterministic analysis is a scaffold; deeper scenario evidence and customer-facing interactions will be built in later iterations.
+5. The four Stage 1 flows are represented by sales decline, overstock, demand spike, and customer feedback. Use the optional product scope to perform a narrower follow-up run.
+6. Use **Record movement** in Inventory & sales only for a deliberate receipt or write-off. In Supabase modes it writes to `inventory_movements` and updates `inventory_levels`; in demo mode the change lasts until the API restarts.
+7. Use **Mark for manual review** in Customer voice to add an owner-review audit record. It does not contact the customer.
 
 ## Data and integrations
 
@@ -73,11 +79,14 @@ The Vite development server proxies `/api` to `http://localhost:8000`.
 
 ## Known limitations / next slices
 
-- Current records live in process memory and reset when the API restarts.
+- Demo-mode records and inventory movements live in process memory and reset when the API restarts. Supabase modes persist the supported records.
 - Demo analysis uses deterministic sample evidence; it is not a live-store forecast or statistical significance claim.
 - LLM analysis uses a CrewAI Flow to run Sales, Inventory, Pricing, and Marketing agents in parallel, then asks the Manager Agent to synthesize their validated results. Agent retries, delegation, tools, and code execution are disabled in this prototype; evidence checks and approval decisions remain in backend code.
 - Approval is a logged prototype decision only; it never changes real prices, stock, or campaigns.
-- Add agent error/timeout injection, persistent feedback and audit storage, broader privacy controls, and evaluation of business outcomes in later iterations.
+- It does not subscribe to real-time sales/inventory feeds or autonomously trigger an analysis. A separate integration is required for polling, webhooks, or Supabase Realtime.
+- There is no cost, margin, supplier lead-time, competitor, customer-segment, channel, or campaign-performance dataset. Therefore suggestions cannot safely state an exact price, reorder quantity, or causal campaign result.
+- Owner login is a local prototype session. Use Supabase Auth and appropriate row-level policies before a production deployment.
+- Approval and manual review are logged controls only. They do not change an external business system; post-action evaluation needs separately collected outcome data.
 
 ## Canvas submission checklist
 
@@ -103,3 +112,15 @@ The customer-help form uses deterministic lookups against available product, pri
 4. Rebuild and start the local containers with `docker compose up --build -d`; then check `/health` and submit illustrative feedback. The health response reports whether server-side Supabase credentials are configured; a successful dashboard load confirms the API can read the seeded tables.
 
 The prototype backend uses a server-side secret/service-role key and the customer page has no login. Keep the service reachable only on the local machine; this is not a production security setup. Sample sales records are synthetic and should be described as demo data in a presentation.
+
+## Optional owner login for the dashboard
+
+The customer page stays public for the demonstration. To require an owner sign-in before viewing or changing dashboard data, add the following values to your **local** `.env` file (never commit them):
+
+```dotenv
+AUTH_REQUIRED=true
+OWNER_EMAIL=562001@163.com
+OWNER_PASSWORD=choose-a-long-unique-local-password
+```
+
+Replace `choose-a-long-unique-local-password` with your local password in `.env`; do not put that password in this README, Git, screenshots, or a report. Restart the backend after editing `.env`. The dashboard then uses an 8-hour, server-memory owner session; logout invalidates it. This is a local prototype control, not production authentication: use Supabase Auth (with a browser-safe anon key and row-level policies) or another identity provider before deployment.
