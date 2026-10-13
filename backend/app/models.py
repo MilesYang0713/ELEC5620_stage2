@@ -3,11 +3,15 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 Workflow = Literal["sales_decline", "overstock", "demand_spike", "feedback_analysis"]
+SpecialistName = Literal["Sales Agent", "Inventory Agent", "Pricing Agent", "Marketing Agent"]
 
 
 class AnalyzeRequest(BaseModel):
     question: str = Field(min_length=5, max_length=1000)
     workflow: Workflow | None = None
+    # This is deliberately a demonstration control: it makes resilience and partial
+    # results observable without disconnecting a real model provider.
+    simulate_failures: list[SpecialistName] = Field(default_factory=list, max_length=4)
 
 
 class AgentResult(BaseModel):

@@ -114,7 +114,8 @@ def _fallback_recommendation(flow: Workflow, agent_results: list[AgentResult], f
 
 
 def run_llm(question: str, workflow: Workflow | None = None, *, products: list[dict] = PRODUCTS,
-            feedback_records: list[dict] = FEEDBACK, data_mode: str = "llm") -> AnalysisRun:
+            feedback_records: list[dict] = FEEDBACK, data_mode: str = "llm",
+            simulated_failures: set[str] | None = None) -> AnalysisRun:
     flow = workflow or infer_workflow(question)
     run_id = str(uuid4())
     now = datetime.now(timezone.utc)
@@ -136,8 +137,9 @@ def run_llm(question: str, workflow: Workflow | None = None, *, products: list[d
     )
     results: dict[str, AgentResult] = {}
     errors = list(execution.specialist_errors)
+    forced_failures = simulated_failures or set()
     for name in AGENTS:
-        result = execution.specialist_results.get(name)
+        result = None if name in forced_failures else execution.specialist_results.get(name)
         completed_at = result.get("completed_at", datetime.now(timezone.utc)) if result else datetime.now(timezone.utc)
         if not result or result.get("status") != "completed":
             results[name] = AgentResult(
@@ -197,6 +199,8 @@ def run_llm(question: str, workflow: Workflow | None = None, *, products: list[d
         limitations.append("Partial analysis: unavailable agents: " + ", ".join(errors) + ".")
     if manager_error:
         limitations.append("Manager synthesis was unavailable; a conservative fallback recommendation is shown.")
+    if forced_failures:
+        limitations.append("Demo resilience control marked these specialist results unavailable: " + ", ".join(sorted(forced_failures)) + ".")
     status = "completed" if not errors and not manager_error else "partial"
     return AnalysisRun(
         id=run_id, question=question, workflow=flow, status=status, data_mode=data_mode,
@@ -205,22 +209,38 @@ def run_llm(question: str, workflow: Workflow | None = None, *, products: list[d
 
 
 def run_demo(question: str, workflow: Workflow | None = None, *, products: list[dict] = PRODUCTS,
-             feedback_records: list[dict] = FEEDBACK, data_mode: str = "demo") -> AnalysisRun:
+             feedback_records: list[dict] = FEEDBACK, data_mode: str = "demo",
+             simulated_failures: set[str] | None = None) -> AnalysisRun:
     flow = workflow or infer_workflow(question)
     run_id = str(uuid4())
     now = datetime.now(timezone.utc)
     agents = []
+    forced_failures = simulated_failures or set()
     for name in AGENTS:
+        if name in forced_failures:
+            agents.append(AgentResult(
+                agent=name, status="failed", summary="Simulated unavailable result for resilience demonstration.",
+                evidence=[], limitations=["This controlled failure shows that the Manager can continue with available evidence."],
+                completed_at=now,
+            ))
+            continue
         evidence = []
         summary = "Reviewed the available business records for this workflow."
         if name == "Sales Agent":
             for product in products:
                 diff = product["units_sold_7d"] - product["units_sold_prev_7d"]
-                evidence.append(f"{product['name']}: {diff:+} units week-over-week ({product['units_sold_7d']} vs {product['units_sold_prev_7d']}).")
-            summary = "Compared the latest 7 days with the prior 7 days using the available sales records."
+                baseline = max(product["units_sold_prev_7d"], 1)
+                change = diff / baseline * 100
+                revenue = product["units_sold_7d"] * product["price"]
+                evidence.append(f"{product['name']}: {diff:+} units week-over-week ({change:+.0f}%; {product['units_sold_7d']} vs {product['units_sold_prev_7d']}), A${revenue:.2f} latest-week listed-price revenue.")
+            summary = "Compared 7-day unit movement and listed-price revenue with the prior 7-day baseline."
         elif name == "Inventory Agent":
-            evidence = [f"{p['name']}: {p['stock']} units currently in stock." for p in products]
-            summary = "Checked current stock and estimated near-term pressure from recent unit sales."
+            for product in products:
+                daily_velocity = product["units_sold_7d"] / 7
+                cover_days = product["stock"] / daily_velocity if daily_velocity else None
+                cover_text = f"about {cover_days:.1f} days of cover at the latest sales rate" if cover_days is not None else "no recent sales velocity to estimate stock cover"
+                evidence.append(f"{product['name']}: {product['stock']} units in stock; {cover_text}.")
+            summary = "Checked stock against the latest 7-day sales velocity; supplier lead times remain unavailable."
         elif name == "Pricing Agent":
             evidence = [f"{p['name']}: listed price A${p['price']:.2f}. No margin or competitor data is available." for p in products]
             summary = "Reviewed listed prices; no cost or competitor benchmark is available."
@@ -252,14 +272,17 @@ def run_demo(question: str, workflow: Workflow | None = None, *, products: list[
         recommendation_evidence = [f"{product_names.get(item['product_id'], 'Product')}: {item['content']}" for item in feedback_records[:3]]
         if not recommendation_evidence:
             recommendation_evidence = ["No customer feedback has been submitted yet."]
+    partial = bool(forced_failures)
     recommendation = Recommendation(
         id=str(uuid4()), title=title, priority="high" if risk else "medium", action=action,
         evidence=recommendation_evidence,
-        confidence="Low to moderate: based on a small, seeded sample.", high_risk=risk,
+        confidence="Low: partial analysis; one or more specialist results were intentionally unavailable." if partial else "Low to moderate: based on a small, seeded sample.", high_risk=risk,
         status="pending_approval" if risk else "advisory",
         approval_note="Approval records an owner decision in this prototype only. No real price, stock, or campaign action will occur." if risk else "Advisory only; no operational change is executed.",
     )
     limitation = (["Records were loaded from Supabase; the seeded records are illustrative, not live-store data."]
                   if data_mode == "supabase" else ["Demo records are illustrative, not live business data."])
     limitation.append("No cost, supplier lead-time, competitor, or campaign history is connected.")
-    return AnalysisRun(id=run_id, question=question, workflow=flow, status="completed", data_mode=data_mode, created_at=now, agents=agents, recommendations=[recommendation], limitations=limitation)
+    if forced_failures:
+        limitation.append("Partial analysis: unavailable agents: " + ", ".join(sorted(forced_failures)) + ".")
+    return AnalysisRun(id=run_id, question=question, workflow=flow, status="partial" if partial else "completed", data_mode=data_mode, created_at=now, agents=agents, recommendations=[recommendation], limitations=limitation)

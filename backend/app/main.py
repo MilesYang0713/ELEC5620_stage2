@@ -12,6 +12,7 @@ from .models import AnalysisRun, AnalyzeRequest, CustomerQuestion, DecisionReque
 from .orchestrator import LLMAnalysisError, run_demo, run_llm
 from . import supabase_store
 from .customer_qa import answer_customer_question
+from .insights import feedback_insights, product_indicators
 
 app = FastAPI(title="SoloRetail AI API", version="0.2.0", description="Retail analysis prototype with demo and DashScope-compatible LLM modes")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://localhost:4173"], allow_methods=["*"], allow_headers=["*"])
@@ -55,8 +56,8 @@ def dashboard():
             raise HTTPException(status_code=503, detail=str(exc)) from None
         return {"data_mode": mode, "as_of": datetime.now(timezone.utc), "products": products,
                 "feedback_count": len(feedback_records), "feedback": feedback_records,
-                "runs": runs, "audit": audit}
-    return {"data_mode": current_data_mode(), "as_of": datetime.now(timezone.utc), "products": PRODUCTS, "feedback_count": len(FEEDBACK), "feedback": FEEDBACK, "runs": list(RUNS.values())[-5:], "audit": AUDIT[-10:]}
+                "runs": runs, "audit": audit, "insights": {"products": product_indicators(products), "feedback": feedback_insights(feedback_records)}}
+    return {"data_mode": current_data_mode(), "as_of": datetime.now(timezone.utc), "products": PRODUCTS, "feedback_count": len(FEEDBACK), "feedback": FEEDBACK, "runs": list(RUNS.values())[-5:], "audit": AUDIT[-10:], "insights": {"products": product_indicators(PRODUCTS), "feedback": feedback_insights(FEEDBACK)}}
 
 
 @app.post("/api/analyze", response_model=AnalysisRun)
@@ -74,7 +75,8 @@ def analyze(request: AnalyzeRequest):
     if use_llm:
         try:
             run = run_llm(request.question, request.workflow, products=products, feedback_records=feedback_records,
-                          data_mode="supabase_llm" if use_supabase else "llm")
+                          data_mode="supabase_llm" if use_supabase else "llm",
+                          simulated_failures=set(request.simulate_failures))
         except LLMConfigurationError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from None
         except LLMAnalysisError as exc:
@@ -83,16 +85,19 @@ def analyze(request: AnalyzeRequest):
             raise HTTPException(status_code=502, detail="The configured model provider could not return a valid response.") from None
     elif mode in ("demo", "supabase"):
         run = run_demo(request.question, request.workflow, products=products, feedback_records=feedback_records,
-                       data_mode="supabase" if use_supabase else "demo")
+                       data_mode="supabase" if use_supabase else "demo",
+                       simulated_failures=set(request.simulate_failures))
     else:
         raise HTTPException(status_code=503, detail="DATA_MODE must be demo, llm, supabase, or supabase_llm.")
 
     RUNS[run.id] = run
-    summary_mode = "LLM-assisted analysis using seeded demo records" if run.data_mode == "llm" else "demo mode"
-    AUDIT.append({"id": str(uuid4()), "event": "analysis_created", "run_id": run.id, "summary": f"Started {run.workflow} analysis in {summary_mode}", "created_at": datetime.now(timezone.utc)})
+    summary_mode = "LLM-assisted analysis" if "llm" in run.data_mode else "deterministic analysis"
+    failure_note = f"; controlled unavailable agents: {', '.join(request.simulate_failures)}" if request.simulate_failures else ""
+    audit_summary = f"Started {run.workflow} {summary_mode} in {run.data_mode} mode{failure_note}"
+    AUDIT.append({"id": str(uuid4()), "event": "analysis_created", "run_id": run.id, "summary": audit_summary, "created_at": datetime.now(timezone.utc)})
     if use_supabase:
         try:
-            supabase_store.save_run(run, audit_summary=f"Started {run.workflow} analysis in {run.data_mode} mode")
+            supabase_store.save_run(run, audit_summary=audit_summary)
         except supabase_store.SupabaseError as exc:
             raise HTTPException(status_code=503, detail=f"Analysis completed, but its database record could not be fully saved. {exc}") from None
     return run

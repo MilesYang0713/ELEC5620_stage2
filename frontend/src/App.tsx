@@ -6,7 +6,8 @@ type Recommendation = { id: string; title: string; priority: string; action: str
 type Product = { id: string; name: string; category: string; price: number; stock: number; units_sold_7d: number; units_sold_prev_7d: number }
 type FeedbackRecord = { id: string; product_id: string; category: string; content: string; submitted_at: string }
 type Run = { id: string; question: string; workflow: string; status: string; data_mode: string; created_at: string; agents: Agent[]; recommendations: Recommendation[]; limitations: string[] }
-type Dashboard = { data_mode: string; products: Product[]; feedback_count: number; feedback: FeedbackRecord[]; runs: Run[]; audit: { id: string; event: string; summary: string; created_at: string }[] }
+type ProductInsight = { product_id: string; weekly_change_percent: number; estimated_cover_days: number | null; latest_week_revenue: number; risk: string }
+type Dashboard = { data_mode: string; products: Product[]; feedback_count: number; feedback: FeedbackRecord[]; runs: Run[]; audit: { id: string; event: string; summary: string; created_at: string }[]; insights?: { products: ProductInsight[]; feedback: { theme_counts: Record<string, number>; sentiment_counts: Record<string, number>; record_count: number } } }
 
 const scenarios = [
   { key: 'sales_decline', label: 'Sales decline', prompt: 'Why are Harbour Blend Coffee sales falling, and what should I do?' },
@@ -40,6 +41,7 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
+  const [simulateFailure, setSimulateFailure] = useState(false)
 
   async function refresh() {
     try { const response = await fetch('/api/dashboard'); setData(await readJson<Dashboard>(response)); setError('') }
@@ -53,7 +55,7 @@ export default function App() {
     if (prompt.trim().length < 5) { setError('Enter a little more detail so the Manager Agent can scope the analysis.'); return }
     setBusy(true); setError(''); setNotice('')
     try {
-      const response = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: prompt, workflow }) })
+      const response = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: prompt, workflow, simulate_failures: simulateFailure ? ['Marketing Agent'] : [] }) })
       const body = await readJson<Run>(response)
       setRun(body); setQuestion(prompt); await refresh()
     } catch (e) { setError(e instanceof Error ? e.message : 'Analysis failed.') }
@@ -70,11 +72,18 @@ export default function App() {
   }
 
   const products = data?.products ?? []
+  const productInsights = new Map((data?.insights?.products ?? []).map((item) => [item.product_id, item]))
   const storedRuns = data?.runs ?? []
   const currentRun = run ?? storedRuns[storedRuns.length - 1] ?? null
   const activeRecommendation = currentRun?.recommendations[0]
-  const avgUnits = products.length ? products.reduce((sum, p) => sum + p.units_sold_7d, 0) : 0
-  const approvals = currentRun?.recommendations.filter((r) => r.high_risk) ?? []
+  const currentUnits = products.reduce((sum, p) => sum + p.units_sold_7d, 0)
+  const previousUnits = products.reduce((sum, p) => sum + p.units_sold_prev_7d, 0)
+  const unitChange = previousUnits ? Math.round((currentUnits - previousUnits) / previousUnits * 100) : 0
+  const currentRevenue = products.reduce((sum, p) => sum + p.units_sold_7d * p.price, 0)
+  const previousRevenue = products.reduce((sum, p) => sum + p.units_sold_prev_7d * p.price, 0)
+  const revenueChange = previousRevenue ? Math.round((currentRevenue - previousRevenue) / previousRevenue * 100) : 0
+  const allRuns = Array.from(new Map([run, ...storedRuns].filter((item): item is Run => Boolean(item)).map((item) => [item.id, item])).values())
+  const approvals = allRuns.flatMap((item) => item.recommendations.filter((recommendation) => recommendation.high_risk && recommendation.status === 'pending_approval').map((recommendation) => ({ run: item, recommendation })))
   const supabaseMode = data?.data_mode === 'supabase' || data?.data_mode === 'supabase_llm'
   const llmMode = data?.data_mode === 'llm' || data?.data_mode === 'supabase_llm'
   const dataSourceTitle = supabaseMode ? (llmMode ? 'Supabase data · Qwen analysis' : 'Supabase database is active') : (llmMode ? 'Qwen analysis is active' : 'Demo data is active')
@@ -86,31 +95,31 @@ export default function App() {
       <div className="brand"><div className="brand-mark"><Store size={19} /></div><div><b>SoloRetail</b><span>AI OPERATIONS</span></div></div>
       <div className="store-switch"><div className="store-avatar">H</div><div><b>Harbour & Co.</b><span>Independent retailer</span></div><ChevronDown size={15} /></div>
       <div className="nav-label">WORKSPACE</div>
-      <nav><a className="nav-item active"><LayoutDashboard size={17}/> Overview</a><a className="nav-item"><Activity size={17}/> Agent runs <span className="nav-count">{data?.runs.length ?? 0}</span></a><a className="nav-item"><ShieldCheck size={17}/> Approvals {approvals.length > 0 && <i className="nav-dot"/>}</a><a className="nav-item" href="#customer-voice"><MessageSquareText size={17}/> Customer voice</a></nav>
-      <div className="sidebar-bottom"><div className="help-card"><CircleHelp size={17}/><div><b>Need a hand?</b><span>View the demo guide</span></div></div><div className="profile"><div className="profile-avatar">JM</div><div><b>Jordan Mitchell</b><span>Store owner</span></div><ChevronDown size={14}/></div></div>
+      <nav><a className="nav-item active" href="#overview"><LayoutDashboard size={17}/> Overview</a><a className="nav-item" href="#agent-runs"><Activity size={17}/> Agent runs <span className="nav-count">{allRuns.length}</span></a><a className="nav-item" href="#approvals"><ShieldCheck size={17}/> Approvals {approvals.length > 0 && <i className="nav-dot"/>}</a><a className="nav-item" href="#customer-voice"><MessageSquareText size={17}/> Customer voice</a></nav>
+      <div className="sidebar-bottom"><button className="help-card" onClick={()=>setNotice('Demo guide: choose a workflow, inspect evidence and limitations, then approve or reject only high-risk recommendations.')}><CircleHelp size={17}/><div><b>Need a hand?</b><span>View the demo guide</span></div></button><div className="profile"><div className="profile-avatar">JM</div><div><b>Jordan Mitchell</b><span>Store owner</span></div><ChevronDown size={14}/></div></div>
     </aside>
     <main className="main-area">
-      <header className="topbar"><div className="breadcrumbs">Workspace <span>/</span> <b>Overview</b></div><div className="top-actions"><span className="live-pill"><i/> Demo environment</span><button className="icon-button" aria-label="Notifications"><Bell size={17}/><i/></button><div className="top-avatar">JM</div></div></header>
-      <div className="page-content">
-        <div className="page-heading"><div><div className="eyebrow">THURSDAY, 9 OCTOBER 2026 <span>·</span> SYDNEY, AU</div><h1>Good morning, Jordan <span>✳</span></h1><p>Here’s what’s happening across your store today.</p></div><button className="date-filter"><Clock3 size={15}/> Last 7 days <ChevronDown size={14}/></button></div>
+      <header className="topbar"><div className="breadcrumbs">Workspace <span>/</span> <b>Overview</b></div><div className="top-actions"><span className="live-pill"><i/> {supabaseMode ? 'Supabase environment' : 'Demo environment'}</span><button className="icon-button" aria-label="Notifications" onClick={()=>setNotice(`${approvals.length} high-risk recommendation${approvals.length === 1 ? '' : 's'} awaiting owner review.`)}><Bell size={17}/><i/></button><div className="top-avatar">JM</div></div></header>
+      <div className="page-content" id="overview">
+        <div className="page-heading"><div><div className="eyebrow">STORE OPERATIONS <span>·</span> SYDNEY, AU</div><h1>Good morning, Jordan <span>✳</span></h1><p>Here’s what’s happening across your store today.</p></div><button className="date-filter" onClick={()=>setNotice('All sales comparisons use the latest 7 days against the preceding 7 days.')}><Clock3 size={15}/> Last 7 days <ChevronDown size={14}/></button></div>
         <div className="demo-banner"><div className="demo-icon"><Database size={16}/></div><div><b>{dataSourceTitle}</b><span>{dataSourceDescription}</span></div><span className="demo-tag">{dataSourceTag}</span></div>
         {error && <div className="alert error"><X size={16}/>{error}<button onClick={() => void refresh()}>Retry</button></div>}
         {notice && <div className="alert success"><Check size={16}/>{notice}<button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}
         <section className="metric-grid">
-          <Metric title="Sales · last 7 days" value={money(products.reduce((s,p)=>s+p.units_sold_7d*p.price,0))} change="12.8%" down note="vs previous 7 days" icon="↘" tone="sage"/>
-          <Metric title="Units sold" value={String(avgUnits)} change="8.2%" down note="vs previous 7 days" icon="▤" tone="lavender"/>
-          <Metric title="Products to watch" value={String(products.filter(p=>p.stock<15).length)} change="2 need attention" note="low stock or declining sales" icon="!" tone="peach"/>
-          <Metric title="Customer feedback" value={String(data?.feedback_count ?? 0)} change="2 new" note="in the last 7 days" icon="♡" tone="blue"/>
+          <Metric title="Sales · last 7 days" value={money(currentRevenue)} change={`${Math.abs(revenueChange)}%`} down={revenueChange < 0} note="vs previous 7 days" icon="↘" tone="sage"/>
+          <Metric title="Units sold" value={String(currentUnits)} change={`${Math.abs(unitChange)}%`} down={unitChange < 0} note="vs previous 7 days" icon="▤" tone="lavender"/>
+          <Metric title="Products to watch" value={String(products.filter(p=>p.stock<15 || p.units_sold_7d<p.units_sold_prev_7d).length)} change="review evidence" note="low stock or declining sales" icon="!" tone="peach"/>
+          <Metric title="Customer feedback" value={String(data?.feedback_count ?? 0)} change="record-grounded" note="available for analysis" icon="♡" tone="blue"/>
         </section>
 
         <div className="content-grid">
           <section className="panel analysis-panel">
             <div className="panel-heading"><div><div className="section-kicker"><Sparkles size={14}/> AI BUSINESS ASSISTANT</div><h2>What would you like to work on?</h2><p>Ask a question or start with a common workflow.</p></div><span className="manager-badge"><i/> Manager ready</span></div>
-            <div className="composer"><textarea value={question} onChange={(e)=>setQuestion(e.target.value)} onKeyDown={(e)=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();void analyze()}}} placeholder="e.g. Why are my coffee sales slowing down?" rows={2}/><div className="composer-bottom"><span>AI suggestions are advisory only</span><button className="primary-button" disabled={busy} onClick={()=>void analyze()}><Play size={14} fill="currentColor"/>{busy?'Analysing…':'Run analysis'}</button></div></div>
+            <div className="composer"><textarea value={question} onChange={(e)=>setQuestion(e.target.value)} onKeyDown={(e)=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();void analyze()}}} placeholder="e.g. Why are my coffee sales slowing down?" rows={2}/><div className="composer-bottom"><label className="failure-toggle"><input type="checkbox" checked={simulateFailure} onChange={(event)=>setSimulateFailure(event.target.checked)} /> Demonstrate a missing Marketing Agent result</label><button className="primary-button" disabled={busy} onClick={()=>void analyze()}><Play size={14} fill="currentColor"/>{busy?'Analysing…':'Run analysis'}</button></div></div>
             <div className="scenario-row">{scenarios.map((s)=><button key={s.key} className="scenario-chip" disabled={busy} onClick={()=>void analyze(s.prompt,s.key)}><span className={`scenario-dot ${s.key}`}/>{s.label}<ArrowUpRight size={12}/></button>)}</div>
           </section>
-          <section className="panel watch-panel"><div className="panel-title-row"><div><div className="section-kicker">STORE PULSE</div><h2>Needs a closer look</h2></div><button className="text-button">View all <ArrowUpRight size={13}/></button></div>
-            {products.filter(p=>p.stock<15 || p.units_sold_7d<p.units_sold_prev_7d).map(p=><div className="watch-item" key={p.id}><div className="product-icon">{p.category==='Wellness'?'✳':'◉'}</div><div className="watch-info"><b>{p.name}</b><span>{p.stock<15?`${p.stock} units in stock · low cover`:`${p.units_sold_7d} sold this week`}</span></div><span className={`trend ${p.units_sold_7d<p.units_sold_prev_7d?'negative':'positive'}`}>{p.units_sold_7d<p.units_sold_prev_7d?<ArrowDownRight size={14}/>:<ArrowUpRight size={14}/>} {p.units_sold_7d-p.units_sold_prev_7d>0?'+':''}{p.units_sold_7d-p.units_sold_prev_7d}</span></div>)}
+          <section className="panel watch-panel"><div className="panel-title-row"><div><div className="section-kicker">STORE PULSE</div><h2>Needs a closer look</h2></div><a className="text-button" href="#inventory">View all <ArrowUpRight size={13}/></a></div>
+            {products.filter(p=>p.stock<15 || p.units_sold_7d<p.units_sold_prev_7d).map(p=>{const insight=productInsights.get(p.id);return <div className="watch-item" key={p.id}><div className="product-icon">{p.category==='Wellness'?'✳':'◉'}</div><div className="watch-info"><b>{p.name}</b><span>{insight?.estimated_cover_days != null ? `${insight.estimated_cover_days} days cover · ${insight.risk.replace(/_/g,' ')}` : `${p.units_sold_7d} sold this week`}</span></div><span className={`trend ${p.units_sold_7d<p.units_sold_prev_7d?'negative':'positive'}`}>{p.units_sold_7d<p.units_sold_prev_7d?<ArrowDownRight size={14}/>:<ArrowUpRight size={14}/>} {insight ? `${insight.weekly_change_percent > 0 ? '+' : ''}${insight.weekly_change_percent}%` : p.units_sold_7d-p.units_sold_prev_7d}</span></div>})}
             {!products.length && <div className="empty-small">Store metrics will appear when the API is running.</div>}
           </section>
         </div>
@@ -124,13 +133,18 @@ export default function App() {
           </> : <div className="run-empty"><div className="empty-orbit"><Sparkles size={20}/></div><div><b>Your agents are ready when you are.</b><span>Start a workflow above to see a transparent, evidence-led analysis with approval controls.</span></div></div>}
         </section>
 
+        <section className="panel history-panel" id="agent-runs"><div className="panel-title-row"><div><div className="section-kicker">ANALYSIS HISTORY</div><h2>Agent runs</h2></div><span className="workflow-pill">{allRuns.length} saved</span></div><div className="history-list">{allRuns.length ? allRuns.slice(0,8).map((item)=><button className="history-item" key={item.id} onClick={()=>{setRun(item); document.getElementById('overview')?.scrollIntoView({behavior:'smooth'})}}><span className={`history-status ${item.status}`}>{item.status}</span><span><b>{item.recommendations[0]?.title ?? item.workflow}</b><small>{item.workflow.replace('_',' ')} · {new Date(item.created_at).toLocaleString('en-AU')}</small></span><ArrowUpRight size={14}/></button>) : <div className="audit-empty">Start an analysis to create a traceable agent run.</div>}</div></section>
+
+        <section className="panel approvals-panel" id="approvals"><div className="panel-title-row"><div><div className="section-kicker">HUMAN OVERSIGHT</div><h2>Approval queue</h2></div><span className="workflow-pill">{approvals.length} pending</span></div><div className="history-list">{approvals.length ? approvals.map(({run: approvalRun, recommendation})=><article className="approval-item" key={recommendation.id}><div><b>{recommendation.title}</b><small>{approvalRun.workflow.replace('_',' ')} · {recommendation.action}</small></div><div className="approval-actions"><button className="approve-button" onClick={()=>{setRun(approvalRun); void decide(recommendation,'approve')}}><Check size={14}/> Approve</button><button className="reject-button" onClick={()=>{setRun(approvalRun); void decide(recommendation,'reject')}}><X size={14}/> Reject</button></div></article>) : <div className="audit-empty">No high-risk recommendations are awaiting owner approval.</div>}</div></section>
+
         <section className="panel customer-voice-panel" id="customer-voice">
           <div className="panel-title-row"><div><div className="section-kicker">CUSTOMER VOICE · {data?.feedback_count ?? 0} RECORDS</div><h2>Recent customer feedback</h2></div><div className="feedback-actions"><button className="text-button" disabled={busy} onClick={()=>void analyze(scenarios[3].prompt,'feedback_analysis')}>Analyze feedback <ArrowUpRight size={13}/></button><a className="text-button" href="/customer">Open customer form <ArrowUpRight size={13}/></a></div></div>
           <p className="feedback-privacy">Demo inbox. Contact details such as email addresses and phone numbers are masked before storage. Avoid entering names, addresses, or payment details.</p>
+          {data?.insights?.feedback.record_count ? <p className="feedback-privacy">Themes: {Object.entries(data.insights.feedback.theme_counts).map(([theme,count])=>`${theme} (${count})`).join(' · ')}. Sentiment: {Object.entries(data.insights.feedback.sentiment_counts).map(([kind,count])=>`${kind} (${count})`).join(' · ')}.</p> : null}
           <div className="feedback-list">{(data?.feedback ?? []).slice(0,4).map((item)=>{const product=products.find((p)=>p.id===item.product_id);return <article className="feedback-item" key={item.id}><div><b>{product?.name ?? 'Product feedback'}</b><span>{item.category} · {new Date(item.submitted_at).toLocaleDateString('en-AU')}</span></div><p>{item.content}</p></article>})}{!data?.feedback?.length&&<div className="audit-empty">No feedback has been submitted yet.</div>}</div>
         </section>
 
-        <div className="bottom-grid"><section className="panel inventory-panel"><div className="panel-title-row"><div><div className="section-kicker">PRODUCT SNAPSHOT</div><h2>Inventory & sales</h2></div><button className="text-button">All products <ArrowUpRight size={13}/></button></div><div className="table-wrap"><table><thead><tr><th>PRODUCT</th><th>PRICE</th><th>IN STOCK</th><th>7D SALES</th><th>VS LAST WEEK</th></tr></thead><tbody>{products.map(p=><tr key={p.id}><td><div className="table-product"><span className="table-emoji">{p.category==='Wellness'?'✳':'◉'}</span><span><b>{p.name}</b><small>{p.category}</small></span></div></td><td>{money(p.price)}</td><td><span className={`stock-badge ${p.stock<15?'low':''}`}>{p.stock} units</span></td><td>{p.units_sold_7d} units</td><td><span className={`change-text ${p.units_sold_7d<p.units_sold_prev_7d?'down':'up'}`}>{p.units_sold_7d<p.units_sold_prev_7d?<ArrowDownRight size={13}/>:<ArrowUpRight size={13}/>} {Math.round(Math.abs((p.units_sold_7d-p.units_sold_prev_7d)/Math.max(1,p.units_sold_prev_7d))*100)}%</span></td></tr>)}</tbody></table></div></section>
+        <div className="bottom-grid"><section className="panel inventory-panel" id="inventory"><div className="panel-title-row"><div><div className="section-kicker">PRODUCT SNAPSHOT</div><h2>Inventory & sales</h2></div><a className="text-button" href="#overview">Dashboard top <ArrowUpRight size={13}/></a></div><div className="table-wrap"><table><thead><tr><th>PRODUCT</th><th>PRICE</th><th>IN STOCK</th><th>7D SALES</th><th>VS LAST WEEK</th></tr></thead><tbody>{products.map(p=><tr key={p.id}><td><div className="table-product"><span className="table-emoji">{p.category==='Wellness'?'✳':'◉'}</span><span><b>{p.name}</b><small>{p.category}</small></span></div></td><td>{money(p.price)}</td><td><span className={`stock-badge ${p.stock<15?'low':''}`}>{p.stock} units</span></td><td>{p.units_sold_7d} units</td><td><span className={`change-text ${p.units_sold_7d<p.units_sold_prev_7d?'down':'up'}`}>{p.units_sold_7d<p.units_sold_prev_7d?<ArrowDownRight size={13}/>:<ArrowUpRight size={13}/>} {Math.round(Math.abs((p.units_sold_7d-p.units_sold_prev_7d)/Math.max(1,p.units_sold_prev_7d))*100)}%</span></td></tr>)}</tbody></table></div></section>
           <section className="panel audit-panel"><div className="panel-title-row"><div><div className="section-kicker">TRACEABILITY</div><h2>Recent activity</h2></div><button className="icon-button subtle" aria-label="Activity"><Activity size={16}/></button></div><div className="audit-list">{(data?.audit ?? []).slice(-4).reverse().map((entry)=><div className="audit-item" key={entry.id}><span className="audit-icon"><Check size={12}/></span><div><b>{entry.summary}</b><span>{new Date(entry.created_at).toLocaleString('en-AU',{hour:'2-digit',minute:'2-digit',day:'numeric',month:'short'})}</span></div></div>)}{!data?.audit?.length&&<div className="audit-empty">Analysis runs and owner decisions will be time-stamped here.</div>}</div></section></div>
         <footer className="page-footer"><span><ShieldCheck size={14}/> AI outputs are advisory. You remain in control of every business decision.</span><span>SoloRetail AI · Stage 2 Prototype</span></footer>
       </div>
