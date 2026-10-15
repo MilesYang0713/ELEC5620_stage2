@@ -70,21 +70,56 @@ def _parse_json_object(text: str) -> dict[str, Any]:
     return value
 
 
-def _strings(value: Any, limit: int = 8) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [item.strip()[:500] for item in value if isinstance(item, str) and item.strip()][:limit]
+def _required_string(result: dict[str, Any], key: str, limit: int) -> str:
+    value = result.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise LLMRequestError("The model returned data that did not match the expected JSON format.")
+    return value.strip()[:limit]
+
+
+def _required_string_list(result: dict[str, Any], key: str) -> list[str]:
+    value = result.get(key)
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise LLMRequestError("The model returned data that did not match the expected JSON format.")
+    return [item.strip()[:500] for item in value if item.strip()][:8]
 
 
 def _parse_specialist(_name: str, raw: str, facts: list[str]) -> dict[str, Any]:
     result = _parse_json_object(raw)
+    summary = _required_string(result, "summary", 1000)
+    reported_evidence = _required_string_list(result, "evidence")
+    limitations = _required_string_list(result, "limitations")
+    evidence = [line for line in reported_evidence if line in facts]
+    if reported_evidence and not evidence:
+        raise LLMRequestError("The model returned no evidence supported by the supplied records.")
     return {
         "status": "completed",
-        "summary": str(result.get("summary", "Reviewed the available demo facts."))[:1000],
-        "evidence": [line for line in _strings(result.get("evidence")) if line in facts],
-        "limitations": _strings(result.get("limitations")) or [
-            "Use only the supplied records; no external store systems are connected."
-        ],
+        "summary": summary,
+        "evidence": evidence,
+        "limitations": limitations,
+    }
+
+
+def _parse_manager(raw: str, evidence_pool: list[str]) -> dict[str, Any]:
+    result = _parse_json_object(raw)
+    title = _required_string(result, "title", 180)
+    action = _required_string(result, "action", 1200)
+    confidence = _required_string(result, "confidence", 300)
+    priority = result.get("priority")
+    if priority not in ("high", "medium", "low"):
+        raise LLMRequestError("The model returned data that did not match the expected JSON format.")
+
+    reported_evidence = _required_string_list(result, "evidence")
+    evidence = [line for line in reported_evidence if line in evidence_pool]
+    if not evidence:
+        raise LLMRequestError("The Manager Agent returned no evidence supported by specialist results.")
+
+    return {
+        "title": title,
+        "action": action,
+        "priority": priority,
+        "evidence": evidence,
+        "confidence": confidence,
     }
 
 
@@ -169,13 +204,12 @@ def run_llm(question: str, workflow: Workflow | None = None, *, products: list[d
     try:
         if not execution.manager_output:
             raise LLMRequestError("The Manager Agent did not return a valid result.")
-        manager = _parse_json_object(execution.manager_output)
-        title = str(manager.get("title", "Retail analysis recommendation"))[:180]
-        action = str(manager.get("action", "Review the available evidence before taking action."))[:1200]
-        priority = manager.get("priority") if manager.get("priority") in ("high", "medium", "low") else "medium"
-        manager_evidence = [line for line in _strings(manager.get("evidence")) if line in evidence_pool]
-        evidence = manager_evidence or evidence_pool[:5]
-        confidence = str(manager.get("confidence", "Low to moderate: based on a small, seeded sample."))[:300]
+        manager = _parse_manager(execution.manager_output, evidence_pool)
+        title = manager["title"]
+        action = manager["action"]
+        priority = manager["priority"]
+        evidence = manager["evidence"]
+        confidence = manager["confidence"]
     except LLMRequestError:
         manager_error = True
         title, action, priority, evidence = _fallback_recommendation(flow, available, facts)
