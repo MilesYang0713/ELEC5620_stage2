@@ -5,6 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 from .demo_data import FEEDBACK, PRODUCTS
+from .diagnostics import log_agent_failure
 from .llm_client import LLMRequestError
 from .models import AgentResult, AnalysisRun, Recommendation, Workflow
 from .crewai_flow import run_retail_analysis_flow
@@ -163,6 +164,7 @@ def run_llm(question: str, workflow: Workflow | None = None, *, products: list[d
         "array 'evidence' copied exactly from the supplied specialist evidence, and string 'confidence'."
     )
     execution = run_retail_analysis_flow(
+        analysis_id=run_id,
         question=question,
         workflow=flow,
         facts=facts,
@@ -210,8 +212,15 @@ def run_llm(question: str, workflow: Workflow | None = None, *, products: list[d
         priority = manager["priority"]
         evidence = manager["evidence"]
         confidence = manager["confidence"]
-    except LLMRequestError:
+    except LLMRequestError as exc:
         manager_error = True
+        if not execution.manager_error:
+            log_agent_failure(
+                analysis_id=run_id,
+                agent_name="Manager Agent",
+                error=exc,
+                error_category="invalid_response",
+            )
         title, action, priority, evidence = _fallback_recommendation(flow, available, facts)
         confidence = "Low: manager synthesis was unavailable; review the specialist results."
 
