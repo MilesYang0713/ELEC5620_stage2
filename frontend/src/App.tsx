@@ -64,6 +64,9 @@ export default function App() {
   const [movementType, setMovementType] = useState<'receipt' | 'write_off'>('receipt')
   const [movementQuantity, setMovementQuantity] = useState('')
   const [movementNote, setMovementNote] = useState('')
+  const [rejectingRecommendation, setRejectingRecommendation] = useState<Recommendation | null>(null)
+  const [rejectionNote, setRejectionNote] = useState('')
+  const [decisionBusy, setDecisionBusy] = useState(false)
 
   function openSection(section: WorkspaceSection) {
     setActiveSection(section)
@@ -121,13 +124,41 @@ export default function App() {
     finally { setBusy(false) }
   }
 
-  async function decide(rec: Recommendation, decision: 'approve' | 'reject') {
+  async function decide(rec: Recommendation, decision: 'approve' | 'reject', note = '') {
+    if (decision === 'reject' && !note.trim()) {
+      setError('Enter a reason before rejecting this recommendation.')
+      return
+    }
+    setDecisionBusy(true)
+    setError('')
     try {
-      const response = await ownerFetch(`/api/recommendations/${rec.id}/decision`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision, note: '' }) })
+      const response = await ownerFetch(`/api/recommendations/${rec.id}/decision`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision, note: note.trim() }) })
       const body = await readJson<{ recommendation: Recommendation; message: string }>(response)
       setRun((current) => current ? { ...current, recommendations: current.recommendations.map((item) => item.id === rec.id ? body.recommendation : item) } : current)
       setNotice(body.message); await refresh()
+      if (decision === 'reject') {
+        setRejectingRecommendation(null)
+        setRejectionNote('')
+      }
     } catch (e) { setError(e instanceof Error ? e.message : 'Approval failed.') }
+    finally { setDecisionBusy(false) }
+  }
+
+  function openRejectForm(rec: Recommendation) {
+    setError('')
+    setRejectionNote('')
+    setRejectingRecommendation(rec)
+  }
+
+  function submitRejection(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!rejectingRecommendation) return
+    const note = rejectionNote.trim()
+    if (!note) {
+      setError('Enter a reason before rejecting this recommendation.')
+      return
+    }
+    void decide(rejectingRecommendation, 'reject', note)
   }
 
   async function escalateFeedback(feedbackId: string) {
@@ -249,7 +280,7 @@ export default function App() {
           {currentRun ? <><div className="run-meta"><span><span className="workflow-pill">{currentRun.workflow.replace('_',' ')}</span></span><span>Started {time(currentRun.created_at)}</span><span className="meta-dot">·</span><span>{currentRun.agents.length} specialist agents</span>{currentRun.scope?.product_name && <><span className="meta-dot">·</span><span>Focused on {currentRun.scope.product_name}</span></>}<span className="meta-spacer"/><span className="demo-inline"><Database size={13}/>{currentRun.data_mode === 'supabase_llm' ? 'Supabase · Qwen' : currentRun.data_mode === 'supabase' ? 'Supabase records' : currentRun.data_mode === 'llm' ? 'Qwen · demo records' : 'Demo data'}</span></div>
             <div className="agent-track">{currentRun.agents.map((a,i)=><div className="agent-step" key={a.agent}><div className={`step-icon ${a.status}`}>{a.status === 'failed' ? <X size={13}/> : <Check size={13}/>}</div>{i<currentRun.agents.length-1&&<div className="step-line"/>}<div><b>{a.agent.replace(' Agent','')}</b><span>{a.status}</span></div></div>)}</div>
             <div className="result-grid"><div className="result-summary"><div className="section-kicker">MANAGER SUMMARY</div><p>{currentRun.recommendations[0]?.action}</p><div className="evidence-list">{currentRun.recommendations[0]?.evidence.slice(0,2).map((e)=><span key={e}><Check size={13}/>{e}</span>)}</div><div className="confidence"><span>Confidence</span><b>{currentRun.recommendations[0]?.confidence}</b></div></div>
-              <div className="recommendation-card"><div className="recommendation-head"><div className="recommendation-icon"><Sparkles size={16}/></div><div><span className="section-kicker">PRIORITY · {activeRecommendation?.priority.toUpperCase()}</span><b>{activeRecommendation?.title}</b></div></div><p>{activeRecommendation?.approval_note}</p>{activeRecommendation?.high_risk&&activeRecommendation.status==='pending_approval'?<div className="approval-actions"><button className="approve-button" onClick={()=>void decide(activeRecommendation,'approve')}><Check size={14}/> Approve</button><button className="reject-button" onClick={()=>void decide(activeRecommendation,'reject')}><X size={14}/> Reject</button></div>:<span className={`status-label ${activeRecommendation?.status}`}>{activeRecommendation?.status.replace('_',' ')}</span>}</div></div>
+              <div className="recommendation-card"><div className="recommendation-head"><div className="recommendation-icon"><Sparkles size={16}/></div><div><span className="section-kicker">PRIORITY · {activeRecommendation?.priority.toUpperCase()}</span><b>{activeRecommendation?.title}</b></div></div><p>{activeRecommendation?.approval_note}</p>{activeRecommendation?.high_risk&&activeRecommendation.status==='pending_approval'?<div className="approval-actions"><button className="approve-button" disabled={decisionBusy} onClick={()=>void decide(activeRecommendation,'approve')}><Check size={14}/> Approve</button><button className="reject-button" disabled={decisionBusy} onClick={()=>openRejectForm(activeRecommendation)}><X size={14}/> Reject</button></div>:<span className={`status-label ${activeRecommendation?.status}`}>{activeRecommendation?.status.replace('_',' ')}</span>}</div></div>
             <div className="limitations"><span><CircleHelp size={14}/><b>Limitations</b></span>{currentRun.limitations.join(' ')}</div>
           </> : <div className="run-empty"><div className="empty-orbit"><Sparkles size={20}/></div><div><b>Your agents are ready when you are.</b><span>Start a workflow above to see a transparent, evidence-led analysis with approval controls.</span></div></div>}
         </section>
@@ -258,7 +289,7 @@ export default function App() {
         </div>
 
         <div className="workspace-module approvals-module">
-          <section className="panel approvals-panel" id="approvals"><div className="panel-title-row"><div><div className="section-kicker">HUMAN OVERSIGHT</div><h2>Approval queue</h2></div><span className="workflow-pill">{approvals.length} pending</span></div><div className="history-list">{approvals.length ? approvals.map(({run: approvalRun, recommendation})=><article className="approval-item" key={recommendation.id}><div><b>{recommendation.title}</b><small>{approvalRun.workflow.replace('_',' ')} · {recommendation.action}</small></div><div className="approval-actions"><button className="approve-button" onClick={()=>{setRun(approvalRun); void decide(recommendation,'approve')}}><Check size={14}/> Approve</button><button className="reject-button" onClick={()=>{setRun(approvalRun); void decide(recommendation,'reject')}}><X size={14}/> Reject</button></div></article>) : <div className="audit-empty">No high-risk recommendations are awaiting owner approval.</div>}</div></section>
+          <section className="panel approvals-panel" id="approvals"><div className="panel-title-row"><div><div className="section-kicker">HUMAN OVERSIGHT</div><h2>Approval queue</h2></div><span className="workflow-pill">{approvals.length} pending</span></div><div className="history-list">{approvals.length ? approvals.map(({run: approvalRun, recommendation})=><article className="approval-item" key={recommendation.id}><div><b>{recommendation.title}</b><small>{approvalRun.workflow.replace('_',' ')} · {recommendation.action}</small></div><div className="approval-actions"><button className="approve-button" disabled={decisionBusy} onClick={()=>{setRun(approvalRun); void decide(recommendation,'approve')}}><Check size={14}/> Approve</button><button className="reject-button" disabled={decisionBusy} onClick={()=>{setRun(approvalRun); openRejectForm(recommendation)}}><X size={14}/> Reject</button></div></article>) : <div className="audit-empty">No high-risk recommendations are awaiting owner approval.</div>}</div></section>
         </div>
 
         <div className="workspace-module customer-voice-module">
@@ -272,6 +303,7 @@ export default function App() {
         </div>
         <footer className="page-footer"><span><ShieldCheck size={14}/> AI outputs are advisory. You remain in control of every business decision.</span><span>SoloRetail AI · Stage 2 Prototype</span></footer>
       </div>
+      {rejectingRecommendation && <div className="dialog-backdrop"><section className="rejection-dialog" role="dialog" aria-modal="true" aria-labelledby="rejection-title"><div className="section-kicker">HUMAN OVERSIGHT</div><h2 id="rejection-title">Reject recommendation</h2><p>{rejectingRecommendation.title}</p><form onSubmit={submitRejection}><label htmlFor="rejection-note">Reason for rejection</label><textarea id="rejection-note" value={rejectionNote} onChange={(event)=>setRejectionNote(event.target.value)} maxLength={500} rows={4} placeholder="Explain why this recommendation was rejected." autoFocus required /><div className="rejection-note-count">{rejectionNote.length}/500</div><div className="rejection-dialog-actions"><button type="button" className="reject-button" disabled={decisionBusy} onClick={()=>{setRejectingRecommendation(null);setRejectionNote('')}}>Cancel</button><button type="submit" className="approve-button" disabled={decisionBusy || !rejectionNote.trim()}>{decisionBusy ? 'Saving…' : 'Confirm rejection'}</button></div></form></section></div>}
     </main>
   </div>
 }
