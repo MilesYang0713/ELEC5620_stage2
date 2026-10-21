@@ -120,11 +120,12 @@ class LLMOutputValidationTests(unittest.TestCase):
             manager_error=False,
         )
 
-        with patch("app.orchestrator.run_retail_analysis_flow", return_value=execution):
+        with patch("app.orchestrator.run_retail_analysis_flow", return_value=execution) as flow_call:
             result = run_llm("Review overstock", workflow="overstock")
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.recommendations[0].evidence, [self.facts[0]])
+        self.assertTrue(flow_call.call_args.kwargs["analysis_id"])
 
 
 if __name__ == "__main__":
