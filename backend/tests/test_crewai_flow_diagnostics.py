@@ -1,5 +1,4 @@
 import asyncio
-import importlib.util
 import json
 import os
 import sys
@@ -11,9 +10,6 @@ from unittest.mock import patch
 
 def _install_crewai_test_stubs():
     """Provide only the CrewAI import surface needed by these isolated flow tests."""
-    if importlib.util.find_spec("crewai") is not None:
-        return
-
     crewai = types.ModuleType("crewai")
     crewai.Agent = object
     crewai.LLM = object
