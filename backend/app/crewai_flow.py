@@ -12,7 +12,7 @@ from crewai import Agent, LLM
 from crewai.flow.flow import Flow, listen, start
 from pydantic import BaseModel, Field
 
-from .diagnostics import log_agent_failure
+from .diagnostics import classify_error, log_agent_failure, log_agent_recovery, retryable_error_category
 from .llm_client import LLMConfigurationError, LLMRequestError
 
 
@@ -24,8 +24,30 @@ class RetailAnalysisState(BaseModel):
     agent_tasks: dict[str, str] = Field(default_factory=dict)
     specialist_results: dict[str, dict[str, Any]] = Field(default_factory=dict)
     specialist_errors: list[str] = Field(default_factory=list)
+    specialist_failure_categories: dict[str, str] = Field(default_factory=dict)
     manager_output: str | None = None
     manager_error: bool = False
+    manager_failure_category: str | None = None
+
+
+async def _kickoff_with_retry(agent: Agent, prompt: str, *, analysis_id: str, agent_name: str) -> Any:
+    """Make at most two attempts for identifiable transient provider failures."""
+    for attempt in (1, 2):
+        try:
+            response = await agent.kickoff_async(prompt)
+            if attempt > 1:
+                log_agent_recovery(analysis_id=analysis_id, agent_name=agent_name, attempt=attempt)
+            return response
+        except Exception as exc:
+            category = retryable_error_category(exc)
+            retrying = category is not None and attempt == 1
+            log_agent_failure(
+                analysis_id=analysis_id, agent_name=agent_name, error=exc,
+                error_category=category, attempt=attempt, retrying=retrying,
+            )
+            if not retrying:
+                raise
+            await asyncio.sleep(2 if category == "rate_limit" else 1)
 
 
 class RetailAnalysisFlow(Flow[RetailAnalysisState]):
@@ -71,13 +93,9 @@ class RetailAnalysisFlow(Flow[RetailAnalysisState]):
 
         async def run_one(name: str, agent: Agent) -> tuple[str, dict[str, Any]]:
             try:
-                response = await agent.kickoff_async(user_prompt)
+                response = await _kickoff_with_retry(agent, user_prompt, analysis_id=state.analysis_id, agent_name=name)
             except Exception as exc:
-                log_agent_failure(
-                    analysis_id=state.analysis_id,
-                    agent_name=name,
-                    error=exc,
-                )
+                state.specialist_failure_categories[name] = classify_error(exc)
                 return name, _failed_agent_result()
 
             try:
@@ -88,6 +106,7 @@ class RetailAnalysisFlow(Flow[RetailAnalysisState]):
                 parsed["completed_at"] = datetime.now(timezone.utc)
                 return name, parsed
             except Exception as exc:
+                state.specialist_failure_categories[name] = "invalid_response"
                 log_agent_failure(
                     analysis_id=state.analysis_id,
                     agent_name=name,
@@ -146,13 +165,12 @@ class RetailAnalysisFlow(Flow[RetailAnalysisState]):
             verbose=False,
         )
         try:
-            response = await agent.kickoff_async(self._manager_system + "\n\n" + user_prompt)
-        except Exception as exc:
-            log_agent_failure(
-                analysis_id=state.analysis_id,
-                agent_name="Manager Agent",
-                error=exc,
+            response = await _kickoff_with_retry(
+                agent, self._manager_system + "\n\n" + user_prompt,
+                analysis_id=state.analysis_id, agent_name="Manager Agent",
             )
+        except Exception as exc:
+            state.manager_failure_category = classify_error(exc)
             state.manager_error = True
             return None
 
@@ -163,6 +181,7 @@ class RetailAnalysisFlow(Flow[RetailAnalysisState]):
             state.manager_output = raw.strip()
             return state.manager_output
         except Exception as exc:
+            state.manager_failure_category = "invalid_response"
             log_agent_failure(
                 analysis_id=state.analysis_id,
                 agent_name="Manager Agent",
