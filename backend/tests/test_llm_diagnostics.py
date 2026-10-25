@@ -51,6 +51,18 @@ class LLMFailureDiagnosticTests(unittest.TestCase):
         self.assertEqual(record["error_category"], "connection")
         self.assertNotIn("sensitive provider detail", json.dumps(record))
 
+    def test_only_retryable_provider_statuses_are_selected(self):
+        class ProviderError(Exception):
+            def __init__(self, status_code):
+                self.status_code = status_code
+
+        for status, category in ((429, "rate_limit"), (503, "server_error")):
+            with self.subTest(status=status):
+                self.assertEqual(self.diagnostics.retryable_error_category(ProviderError(status)), category)
+        for status in (400, 401, 403):
+            with self.subTest(status=status):
+                self.assertIsNone(self.diagnostics.retryable_error_category(ProviderError(status)))
+
 
 if __name__ == "__main__":
     unittest.main()

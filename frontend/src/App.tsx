@@ -12,6 +12,7 @@ type InventoryMovement = { id: string; product_id: string; product_name: string;
 type Dashboard = { data_mode: string; products: Product[]; feedback_count: number; feedback: FeedbackRecord[]; runs: Run[]; audit: { id: string; event: string; summary: string; created_at: string; feedback_id?: string }[]; movements: InventoryMovement[]; insights?: { products: ProductInsight[]; feedback: { theme_counts: Record<string, number>; sentiment_counts: Record<string, number>; record_count: number; classifications: FeedbackClassification[] } } }
 type WorkspaceSection = 'overview' | 'agent-runs' | 'approvals' | 'customer-voice'
 type OwnerSession = { email: string; name: string; role: string }
+type AnalysisActivity = { phase: 'running' | 'completed' | 'partial' | 'failed'; workflow: string; startedAt: number; duration: number; message?: string }
 
 const scenarios = [
   { key: 'sales_decline', label: 'Sales decline', prompt: 'Why are Harbour Blend Coffee sales falling, and what should I do?' },
@@ -42,7 +43,10 @@ export default function App() {
   const [data, setData] = useState<Dashboard | null>(null)
   const [question, setQuestion] = useState('')
   const [run, setRun] = useState<Run | null>(null)
+  const [historyRuns, setHistoryRuns] = useState<Run[] | null>(null)
   const [busy, setBusy] = useState(false)
+  const [analysisActivity, setAnalysisActivity] = useState<AnalysisActivity | null>(null)
+  const [analysisElapsed, setAnalysisElapsed] = useState(0)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [simulateFailure, setSimulateFailure] = useState(false)
@@ -84,9 +88,20 @@ export default function App() {
     const timer = window.setInterval(() => setCurrentTime(new Date()), 60_000)
     return () => window.clearInterval(timer)
   }, [])
+  useEffect(() => {
+    if (analysisActivity?.phase !== 'running') return
+    const timer = window.setInterval(() => setAnalysisElapsed(Math.floor((Date.now() - analysisActivity.startedAt) / 1000)), 1000)
+    return () => window.clearInterval(timer)
+  }, [analysisActivity?.phase, analysisActivity?.startedAt])
 
   async function refresh() {
-    try { const response = await ownerFetch('/api/dashboard'); setData(await readJson<Dashboard>(response)); setError('') }
+    try {
+      const [dashboardResponse, historyResponse] = await Promise.all([ownerFetch('/api/dashboard'), ownerFetch('/api/analyses')])
+      const dashboard = await readJson<Dashboard>(dashboardResponse)
+      setData(dashboard)
+      setHistoryRuns(await readJson<Run[]>(historyResponse))
+      setError('')
+    }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not reach the API. Start the backend or Docker Compose, then refresh.') }
   }
   useEffect(() => {
@@ -97,8 +112,13 @@ export default function App() {
         setAuthRequired(config.authentication_required)
         if (config.authentication_required) {
           const response = await ownerFetch('/api/auth/session')
-          const body = await readJson<{ session: OwnerSession }>(response)
-          setSession(body.session)
+          if (response.status === 401) {
+            window.localStorage.removeItem('soloretail_owner_token')
+            setAuthError('Please sign in to continue.')
+          } else {
+            const body = await readJson<{ session: OwnerSession }>(response)
+            setSession(body.session)
+          }
         } else {
           setSession({ email: 'local-owner@prototype.invalid', name: 'Jordan Mitchell', role: 'Store owner' })
         }
@@ -114,13 +134,21 @@ export default function App() {
   if (window.location.pathname === '/customer') return <CustomerFeedbackPage />
 
   async function analyze(prompt = question, workflow?: string) {
+    if (busy) return
     if (prompt.trim().length < 5) { setError('Enter a little more detail so the Manager Agent can scope the analysis.'); return }
+    const activity: AnalysisActivity = { phase: 'running', workflow: workflow ?? 'custom analysis', startedAt: Date.now(), duration: 0 }
+    setAnalysisActivity(activity); setAnalysisElapsed(0)
     setBusy(true); setError(''); setNotice('')
     try {
       const response = await ownerFetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: prompt, workflow, product_id: analysisProductId || null, simulate_failures: simulateFailure ? ['Marketing Agent'] : [] }) })
       const body = await readJson<Run>(response)
-      setRun(body); setQuestion(prompt); await refresh()
-    } catch (e) { setError(e instanceof Error ? e.message : 'Analysis failed.') }
+      setRun(body); setQuestion(prompt)
+      setAnalysisActivity({ ...activity, phase: body.status === 'partial' ? 'partial' : body.status === 'completed' ? 'completed' : 'failed', duration: Math.floor((Date.now() - activity.startedAt) / 1000) })
+      openSection('agent-runs')
+      await refresh()
+    } catch (e) {
+      setAnalysisActivity({ ...activity, phase: 'failed', duration: Math.floor((Date.now() - activity.startedAt) / 1000), message: e instanceof Error ? e.message : 'Analysis failed.' })
+    }
     finally { setBusy(false) }
   }
 
@@ -185,8 +213,10 @@ export default function App() {
   const productInsights = new Map((data?.insights?.products ?? []).map((item) => [item.product_id, item]))
   const feedbackClassifications = new Map((data?.insights?.feedback.classifications ?? []).map((item) => [item.id, item]))
   const escalatedFeedback = new Set((data?.audit ?? []).filter((entry) => entry.event === 'feedback_escalated' && entry.feedback_id).map((entry) => entry.feedback_id))
-  const storedRuns = data?.runs ?? []
-  const currentRun = run ?? storedRuns[storedRuns.length - 1] ?? null
+  const storedRuns = historyRuns ?? data?.runs ?? []
+  const allRuns = Array.from(new Map([...(data?.runs ?? []), ...storedRuns, run].filter((item): item is Run => Boolean(item)).map((item) => [item.id, item])).values())
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+  const currentRun = run ?? allRuns[0] ?? null
   const activeRecommendation = currentRun?.recommendations[0]
   const currentUnits = products.reduce((sum, p) => sum + p.units_sold_7d, 0)
   const previousUnits = products.reduce((sum, p) => sum + p.units_sold_prev_7d, 0)
@@ -194,7 +224,6 @@ export default function App() {
   const currentRevenue = products.reduce((sum, p) => sum + p.units_sold_7d * p.price, 0)
   const previousRevenue = products.reduce((sum, p) => sum + p.units_sold_prev_7d * p.price, 0)
   const revenueChange = previousRevenue ? Math.round((currentRevenue - previousRevenue) / previousRevenue * 100) : 0
-  const allRuns = Array.from(new Map([run, ...storedRuns].filter((item): item is Run => Boolean(item)).map((item) => [item.id, item])).values())
   const approvals = allRuns.flatMap((item) => item.recommendations.filter((recommendation) => recommendation.high_risk && recommendation.status === 'pending_approval').map((recommendation) => ({ run: item, recommendation })))
   const supabaseMode = data?.data_mode === 'supabase' || data?.data_mode === 'supabase_llm'
   const llmMode = data?.data_mode === 'llm' || data?.data_mode === 'supabase_llm'
@@ -245,8 +274,16 @@ export default function App() {
     <main className="main-area">
       <header className="topbar"><div className="topbar-left"><button className="sidebar-toggle" aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} title={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} onClick={() => setSidebarOpen((open) => !open)}><Menu size={18}/></button><div className="breadcrumbs">Workspace <span>/</span> <b>{sectionTitle[activeSection]}</b></div></div><div className="top-actions"><span className="live-pill"><i/> {supabaseMode ? 'Supabase environment' : 'Demo environment'}</span><div className="store-switch top-store-switch"><div className="store-avatar">H</div><div><b>Harbour & Co.</b><span>Independent retailer</span></div></div><button className="icon-button" aria-label="Notifications" onClick={()=>setNotice(approvals.length ? `${approvals.length} high-risk recommendation${approvals.length === 1 ? '' : 's'} awaiting owner review.` : 'No high-risk recommendations are awaiting owner review.')}><Bell size={17}/>{approvals.length > 0 && <i/>}</button><div className="top-avatar">JM</div></div></header>
       <div className={`page-content module-${activeSection}`}>
-        {error && <div className="alert error"><X size={16}/>{error}<button onClick={() => void refresh()}>Retry</button></div>}
+        {error && <div className="alert error"><X size={16}/>{error}<button onClick={() => void refresh()}>Refresh data</button></div>}
         {notice && <div className="alert success"><Check size={16}/>{notice}<button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}
+        {analysisActivity && <div className={`analysis-activity ${analysisActivity.phase}`} role="status">
+          <span className="analysis-activity-icon">{analysisActivity.phase === 'completed' ? <Check size={16}/> : analysisActivity.phase === 'failed' ? <X size={16}/> : <Clock3 size={16}/>}</span>
+          <div><b>{analysisActivity.phase === 'running' ? 'Analysis in progress' : analysisActivity.phase === 'completed' ? 'Analysis completed' : analysisActivity.phase === 'partial' ? 'Partial analysis completed' : 'Analysis failed'}</b>
+            <span>{analysisActivity.workflow.replace(/_/g, ' ')} · {analysisActivity.phase === 'running' ? 'Waiting for the API response' : `Finished in ${analysisActivity.duration}s`}</span>
+            <p>{analysisActivity.phase === 'running' ? 'The server is processing the specialist and Manager requests. Results and agent statuses appear after the API responds; keep this tab open.' : analysisActivity.message ?? (analysisActivity.phase === 'partial' ? 'Some agents were unavailable. Check the result and limitations before using the recommendation.' : analysisActivity.phase === 'failed' ? 'The server returned a failed analysis. Check the result and API logs.' : 'Open the result to review evidence, recommendations and approval controls.')}</p>
+          </div>
+          {analysisActivity.phase === 'running' ? <span className="analysis-timer" aria-label="Elapsed time">{analysisElapsed}s elapsed</span> : run && analysisActivity.phase !== 'failed' ? <button className="text-button" onClick={() => openSection('agent-runs')}>View result <ArrowUpRight size={13}/></button> : null}
+        </div>}
         <div className="workspace-module overview-module">
         <div className="page-heading" id="overview"><div><div className="eyebrow">STORE OPERATIONS <span>·</span> SYDNEY, AU</div><h1>{greeting}, {ownerFirstName} <span>✳</span></h1><p>Here’s what’s happening across your store today.</p></div><button className="date-filter" onClick={()=>setNotice('All sales comparisons use the latest 7 days against the preceding 7 days.')}><Clock3 size={15}/> Last 7 days <ChevronDown size={14}/></button></div>
         <div className="demo-banner"><div className="demo-icon"><Database size={16}/></div><div><b>{dataSourceTitle}</b><span>{dataSourceDescription}</span></div><span className="demo-tag">{dataSourceTag}</span></div>
@@ -285,7 +322,7 @@ export default function App() {
           </> : <div className="run-empty"><div className="empty-orbit"><Sparkles size={20}/></div><div><b>Your agents are ready when you are.</b><span>Start a workflow above to see a transparent, evidence-led analysis with approval controls.</span></div></div>}
         </section>
 
-        <section className="panel history-panel" id="agent-runs"><div className="panel-title-row"><div><div className="section-kicker">ANALYSIS HISTORY</div><h2>Agent runs</h2></div><span className="workflow-pill">{allRuns.length} saved</span></div><div className="history-list">{allRuns.length ? allRuns.slice(0,8).map((item)=><button className="history-item" key={item.id} onClick={()=>{setRun(item); openSection('agent-runs')}}><span className={`history-status ${item.status}`}>{item.status}</span><span><b>{item.recommendations[0]?.title ?? item.workflow}</b><small>{item.workflow.replace('_',' ')} · {new Date(item.created_at).toLocaleString('en-AU')}</small></span><ArrowUpRight size={14}/></button>) : <div className="audit-empty">Start an analysis to create a traceable agent run.</div>}</div></section>
+        <section className="panel history-panel" id="agent-runs"><div className="panel-title-row"><div><div className="section-kicker">ANALYSIS HISTORY</div><h2>Agent runs</h2></div><span className="workflow-pill">{allRuns.length} saved</span></div><div className="history-list">{allRuns.length ? allRuns.map((item)=><button className={`history-item ${currentRun?.id === item.id ? 'selected' : ''}`} aria-current={currentRun?.id === item.id ? 'true' : undefined} key={item.id} onClick={()=>{setRun(item); setAnalysisActivity(null); openSection('agent-runs')}}><span className={`history-status ${item.status}`}>{item.status}</span><span><b>{item.recommendations[0]?.title ?? item.workflow}</b><small>{item.workflow.replace('_',' ')} · {new Date(item.created_at).toLocaleString('en-AU')}</small></span><ArrowUpRight size={14}/></button>) : <div className="audit-empty">Start an analysis to create a traceable agent run.</div>}</div></section>
         </div>
 
         <div className="workspace-module approvals-module">
@@ -315,18 +352,21 @@ function AuthLoading() {
 }
 
 function LoginPage({ error, onSubmit }: { error: string; onSubmit: (email: string, password: string) => Promise<void> }) {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    // Read the actual inputs so browser password-manager autofill works even
+    // when the browser does not dispatch React change events.
+    const fields = new FormData(event.currentTarget)
+    const email = String(fields.get('username') ?? '')
+    const password = String(fields.get('password') ?? '')
     setBusy(true)
     try { await onSubmit(email, password) }
     finally { setBusy(false) }
   }
 
-  return <main className="auth-page"><section className="auth-card"><div className="brand-mark"><ShoppingBag size={20}/></div><div className="section-kicker">OWNER ACCESS</div><h1>Welcome back</h1><p>Sign in to view Harbour &amp; Co. operations and approve recommendations.</p>{error && <div className="alert error"><X size={16}/>{error}</div>}<form className="login-form" onSubmit={(event) => void submit(event)}><label>Email<input required type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label><label>Password<input required type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Your owner password" /></label><button className="primary-button login-button" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button></form><small>Your local owner session expires after 8 hours or when you sign out.</small></section></main>
+  return <main className="auth-page"><section className="auth-card"><div className="brand-mark"><ShoppingBag size={20}/></div><div className="section-kicker">OWNER ACCESS</div><h1>Welcome back</h1><p>Sign in to view Harbour &amp; Co. operations and approve recommendations.</p>{error && <div className="alert error"><X size={16}/>{error}</div>}<form className="login-form" onSubmit={(event) => void submit(event)}><label>Email<input required name="username" type="email" autoComplete="username" placeholder="you@example.com" /></label><label>Password<input required name="password" type="password" autoComplete="current-password" placeholder="Your owner password" /></label><button className="primary-button login-button" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button></form><small>Save your credentials when your browser offers. Next time, use autofill and click Sign in. Your local owner session expires after 8 hours or when you sign out.</small></section></main>
 }
 
 

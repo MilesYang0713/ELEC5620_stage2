@@ -51,7 +51,15 @@ class AnalysisRun(BaseModel):
 
 class DecisionRequest(BaseModel):
     decision: Literal["approve", "reject"]
-    note: str = Field(default="", max_length=500)
+    note: str = Field(default="", max_length=500, validate_default=True)
+
+    @field_validator("note")
+    @classmethod
+    def require_rejection_reason(cls, value: str, info) -> str:
+        note = value.strip()
+        if info.data.get("decision") == "reject" and not note:
+            raise ValueError("Enter a reason before rejecting this recommendation.")
+        return note
 
 
 class OwnerLogin(BaseModel):

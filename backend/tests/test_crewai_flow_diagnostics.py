@@ -51,6 +51,19 @@ class FailingAgent:
         raise self.error
 
 
+class SequencedAgent:
+    def __init__(self, outcomes):
+        self.outcomes = iter(outcomes)
+        self.calls = 0
+
+    async def kickoff_async(self, _prompt):
+        self.calls += 1
+        result = next(self.outcomes)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
 class CrewAIFlowDiagnosticTests(unittest.TestCase):
     def _logged_event(self, operation):
         with self.assertLogs("app.llm_diagnostics", level="WARNING") as captured:
@@ -144,6 +157,88 @@ class CrewAIFlowDiagnosticTests(unittest.TestCase):
             )
 
         self.assertEqual(state.analysis_id, "run-abc")
+
+    def test_transient_specialist_failure_retries_once_and_recovers(self):
+        agent = SequencedAgent([
+            TimeoutError("private provider details"),
+            SimpleNamespace(raw="valid response"),
+        ])
+        flow = crewai_flow.RetailAnalysisFlow(
+            llm=object(), manager_system="manager instructions",
+            parse_specialist=lambda _name, _raw, _facts: {
+                "status": "completed", "summary": "Recovered", "evidence": [], "limitations": [],
+            },
+        )
+        flow.state = crewai_flow.RetailAnalysisState(
+            analysis_id="run-retry", workflow="overstock", question="review stock",
+            agent_tasks={"Inventory Agent": "review stock"},
+        )
+        with patch.object(crewai_flow, "Agent", return_value=agent), patch.object(
+            crewai_flow.asyncio, "sleep", new_callable=lambda: _no_delay
+        ), self.assertLogs("app.llm_diagnostics", level="WARNING") as captured:
+            asyncio.run(flow.analyze_with_specialists())
+        self.assertEqual(agent.calls, 2)
+        self.assertEqual(flow.state.specialist_results["Inventory Agent"]["status"], "completed")
+        self.assertEqual(flow.state.specialist_errors, [])
+        event = json.loads(captured.output[0].split(":", 2)[2])
+        self.assertEqual((event["attempt"], event["retrying"], event["error_category"]), (1, True, "timeout"))
+        self.assertNotIn("private provider details", json.dumps(event))
+        recovered = json.loads(captured.output[1].split(":", 2)[2])
+        self.assertEqual((recovered["event"], recovered["attempt"]), ("llm_agent_request_recovered", 2))
+
+    def test_auth_failure_is_not_retried(self):
+        class AuthenticationError(Exception):
+            pass
+
+        agent = SequencedAgent([AuthenticationError("private provider details")])
+        with self.assertLogs("app.llm_diagnostics", level="WARNING") as captured:
+            with self.assertRaises(AuthenticationError):
+                asyncio.run(crewai_flow._kickoff_with_retry(
+                    agent, "private prompt", analysis_id="run-auth", agent_name="Manager Agent",
+                ))
+        self.assertEqual(agent.calls, 1)
+        event = json.loads(captured.output[0].split(":", 2)[2])
+        self.assertEqual((event["attempt"], event["retrying"], event["error_category"]), (1, False, "authentication"))
+
+    def test_manager_request_recovers_after_connection_failure(self):
+        agent = SequencedAgent([ConnectionError("private"), SimpleNamespace(raw='{"title":"Review"}')])
+        flow = crewai_flow.RetailAnalysisFlow(
+            llm=object(), manager_system="manager instructions", parse_specialist=lambda *_args: {},
+        )
+        flow.state = crewai_flow.RetailAnalysisState(
+            analysis_id="run-manager-retry", workflow="overstock", question="review stock",
+            specialist_results={"Inventory Agent": {
+                "status": "completed", "summary": "Stock reviewed", "evidence": ["8 units"], "limitations": [],
+            }},
+        )
+        with patch.object(crewai_flow, "Agent", return_value=agent), patch.object(
+            crewai_flow.asyncio, "sleep", new_callable=lambda: _no_delay
+        ), self.assertLogs("app.llm_diagnostics", level="WARNING"):
+            asyncio.run(flow.synthesize_with_manager({"completed": ["Inventory Agent"]}))
+        self.assertEqual(agent.calls, 2)
+        self.assertFalse(flow.state.manager_error)
+        self.assertEqual(flow.state.manager_output, '{"title":"Review"}')
+
+    def test_rate_limit_retries_once_then_stops(self):
+        class RateLimitError(Exception):
+            pass
+
+        agent = SequencedAgent([RateLimitError("private"), RateLimitError("private")])
+        with patch.object(crewai_flow.asyncio, "sleep", new_callable=lambda: _no_delay), self.assertLogs(
+            "app.llm_diagnostics", level="WARNING"
+        ) as captured:
+            with self.assertRaises(RateLimitError):
+                asyncio.run(crewai_flow._kickoff_with_retry(
+                    agent, "prompt", analysis_id="run-limit", agent_name="Pricing Agent",
+                ))
+        self.assertEqual(agent.calls, 2)
+        events = [json.loads(line.split(":", 2)[2]) for line in captured.output]
+        self.assertEqual([event["retrying"] for event in events], [True, False])
+        self.assertEqual([event["error_category"] for event in events], ["rate_limit", "rate_limit"])
+
+
+async def _no_delay(_seconds):
+    pass
 
 
 if __name__ == "__main__":

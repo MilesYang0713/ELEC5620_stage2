@@ -199,7 +199,12 @@ def run_llm(question: str, workflow: Workflow | None = None, *, products: list[d
     agents = [results[name] for name in AGENTS]
     available = [agent for agent in agents if agent.status == "completed"]
     if not available:
-        raise LLMAnalysisError("All specialist agents failed to return a result. Check the provider, region, key, and model configuration.")
+        categories = getattr(execution, "specialist_failure_categories", {})
+        details = ", ".join(f"{name}: {categories.get(name, 'unavailable')}" for name in errors)
+        raise LLMAnalysisError(
+            "All specialist agents failed after the allowed attempts. "
+            f"Failed steps: {details}. Check the API diagnostics for this run."
+        )
 
     evidence_pool = list(dict.fromkeys(line for agent in available for line in agent.evidence))
     manager_error = execution.manager_error
@@ -240,8 +245,16 @@ def run_llm(question: str, workflow: Workflow | None = None, *, products: list[d
     limitations.append("No cost, supplier lead-time, competitor, or campaign history is available.")
     if errors:
         limitations.append("Partial analysis: unavailable agents: " + ", ".join(errors) + ".")
+        categories = getattr(execution, "specialist_failure_categories", {})
+        if categories:
+            limitations.append("Failure categories: " + ", ".join(
+                f"{name}: {categories[name]}" for name in errors if name in categories
+            ) + ".")
     if manager_error:
         limitations.append("Manager synthesis was unavailable; a conservative fallback recommendation is shown.")
+        manager_category = getattr(execution, "manager_failure_category", None)
+        if manager_category:
+            limitations.append(f"Manager failure category: {manager_category}.")
     if forced_failures:
         limitations.append("Demo resilience control marked these specialist results unavailable: " + ", ".join(sorted(forced_failures)) + ".")
     status = "completed" if not errors and not manager_error else "partial"
