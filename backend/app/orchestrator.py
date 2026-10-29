@@ -23,15 +23,56 @@ class LLMAnalysisError(Exception):
     pass
 
 
-def infer_workflow(question: str) -> Workflow:
-    q = question.lower()
-    if any(term in q for term in ("feedback", "review", "complaint", "customer")):
-        return "feedback_analysis"
-    if any(term in q for term in ("overstock", "overstocked", "clearance", "slow-moving", "积压", "清仓")):
-        return "overstock"
-    if any(term in q for term in ("spike", "surge", "sudden", "demand increase", "缺货", "暴涨")):
-        return "demand_spike"
-    return "sales_decline"
+WORKFLOW_CLARIFICATION_MESSAGE = (
+    "Please choose an analysis focus: sales decline, overstock, demand spike, or customer feedback."
+)
+
+_WORKFLOW_TERMS: dict[Workflow, tuple[str, ...]] = {
+    "sales_decline": (
+        "sales decline", "sales are falling", "sales falling", "sales are slowing", "sales slowing",
+        "sales slowed", "sales dropped", "sales drop", "sales decreased", "sales decrease",
+        "sales are down", "declining sales", "decreasing sales", "slow sales", "sales slowdown",
+        "slowdown in sales", "underperforming sales", "销量下滑", "销量下降", "销售下滑",
+        "销售额下降", "销售下降", "销量变慢", "销售变差", "销售放缓", "销量放缓",
+    ),
+    "overstock": (
+        "overstock", "overstocked", "excess stock", "too much stock", "too much inventory", "excess inventory",
+        "slow-moving", "slow moving", "clearance", "clear stock", "stock buildup",
+        "库存积压", "积压", "滞销", "清仓", "库存过多", "库存太多", "卖不动",
+    ),
+    "demand_spike": (
+        "demand spike", "demand spiked", "demand surge", "demand surged", "sudden demand",
+        "demand increase", "selling faster", "selling fast", "stock-out", "stockout", "out of stock",
+        "需求激增", "需求暴涨", "需求上升", "突然畅销", "销量暴增", "缺货", "断货", "售罄风险",
+    ),
+    "feedback_analysis": (
+        "customer feedback", "customer review", "product review", "customer opinions", "customer satisfaction",
+        "what customers think", "reviews", "feedback", "complaint", "complaints", "sentiment", "customer voice", "客户反馈", "顾客反馈",
+        "客户评价", "用户评价", "评论", "投诉", "客户声音",
+    ),
+}
+
+
+def _contains_intent_term(question: str, term: str) -> bool:
+    # Chinese phrases are matched as substrings; English phrases use word boundaries
+    # so short terms do not accidentally match inside unrelated words.
+    if any("\u4e00" <= char <= "\u9fff" for char in term):
+        return term in question
+    return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", question) is not None
+
+
+def infer_workflow(question: str) -> Workflow | None:
+    """Route clear requests with lightweight keyword scoring; defer ambiguous ones to the owner."""
+    q = question.casefold()
+    scores = {
+        workflow: sum(_contains_intent_term(q, term) for term in terms)
+        for workflow, terms in _WORKFLOW_TERMS.items()
+    }
+    highest = max(scores.values(), default=0)
+    if highest == 0:
+        return None
+    matches = [workflow for workflow, score in scores.items() if score == highest]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _business_facts(products: list[dict] = PRODUCTS, feedback_records: list[dict] = FEEDBACK) -> list[str]:
@@ -153,6 +194,8 @@ def run_llm(question: str, workflow: Workflow | None = None, *, products: list[d
             feedback_records: list[dict] = FEEDBACK, data_mode: str = "llm",
             simulated_failures: set[str] | None = None) -> AnalysisRun:
     flow = workflow or infer_workflow(question)
+    if flow is None:
+        raise LLMAnalysisError(WORKFLOW_CLARIFICATION_MESSAGE)
     run_id = str(uuid4())
     now = datetime.now(timezone.utc)
     facts = _business_facts(products, feedback_records)
@@ -268,6 +311,8 @@ def run_demo(question: str, workflow: Workflow | None = None, *, products: list[
              feedback_records: list[dict] = FEEDBACK, data_mode: str = "demo",
              simulated_failures: set[str] | None = None) -> AnalysisRun:
     flow = workflow or infer_workflow(question)
+    if flow is None:
+        raise LLMAnalysisError(WORKFLOW_CLARIFICATION_MESSAGE)
     run_id = str(uuid4())
     now = datetime.now(timezone.utc)
     agents = []

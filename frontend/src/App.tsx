@@ -1,18 +1,24 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Activity, ArrowDownRight, ArrowUpRight, Bell, Check, ChevronDown, CircleHelp, Clock3, Database, LayoutDashboard, LogOut, Menu, MessageSquareText, Package, Play, ShieldCheck, ShoppingBag, Sparkles, X } from 'lucide-react'
+import { Activity, ArrowDownRight, ArrowUpRight, BarChart3, Bell, Check, ChevronDown, CircleHelp, Clock3, Database, LayoutDashboard, LogOut, Menu, MessageSquareText, Package, Play, ShieldCheck, ShoppingBag, Sparkles, X } from 'lucide-react'
 
 type Agent = { agent: string; status: string; summary: string; evidence: string[]; limitations: string[] }
 type Recommendation = { id: string; title: string; priority: string; action: string; evidence: string[]; confidence: string; high_risk: boolean; status: string; approval_note: string }
-type Product = { id: string; name: string; category: string; price: number; stock: number; units_sold_7d: number; units_sold_prev_7d: number }
+type Product = { id: string; name: string; category: string; price: number; stock: number; units_sold_7d: number; units_sold_prev_7d: number; units_sold_14d?: number; revenue_7d?: number; revenue_prev_7d?: number; revenue_14d?: number }
 type FeedbackRecord = { id: string; product_id: string; category: string; content: string; submitted_at: string }
 type Run = { id: string; question: string; workflow: string; status: string; data_mode: string; created_at: string; agents: Agent[]; recommendations: Recommendation[]; limitations: string[]; scope?: { product_id?: string; product_name?: string } }
 type ProductInsight = { product_id: string; weekly_change_percent: number; estimated_cover_days: number | null; latest_week_revenue: number; risk: string }
 type FeedbackClassification = { id: string; themes: string[]; sentiment: string; priority: string }
 type InventoryMovement = { id: string; product_id: string; product_name: string; movement_type: string; quantity: number; note: string; occurred_at: string; updated_stock?: number }
-type Dashboard = { data_mode: string; products: Product[]; feedback_count: number; feedback: FeedbackRecord[]; runs: Run[]; audit: { id: string; event: string; summary: string; created_at: string; feedback_id?: string }[]; movements: InventoryMovement[]; insights?: { products: ProductInsight[]; feedback: { theme_counts: Record<string, number>; sentiment_counts: Record<string, number>; record_count: number; classifications: FeedbackClassification[] } } }
-type WorkspaceSection = 'overview' | 'agent-runs' | 'approvals' | 'customer-voice'
+type Dashboard = { data_mode: string; business_as_of_date?: string; products: Product[]; feedback_count: number; feedback: FeedbackRecord[]; runs: Run[]; audit: { id: string; event: string; summary: string; created_at: string; feedback_id?: string }[]; movements: InventoryMovement[]; insights?: { products: ProductInsight[]; feedback: { theme_counts: Record<string, number>; sentiment_counts: Record<string, number>; record_count: number; classifications: FeedbackClassification[] } } }
+type SalesPoint = { date: string; quantity: number; revenue: number }
+type ProductTrend = { product_id: string; days: number; sales: SalesPoint[]; movements: InventoryMovement[]; sales_source: 'recorded' | 'illustrative' }
+type TrendMetric = 'quantity' | 'revenue'
+type WorkspaceSection = 'overview' | 'product-trends' | 'agent-runs' | 'approvals' | 'customer-voice'
 type OwnerSession = { email: string; name: string; role: string }
-type AnalysisActivity = { phase: 'running' | 'completed' | 'partial' | 'failed'; workflow: string; startedAt: number; duration: number; message?: string }
+type WorkflowChoice = { key: string; label: string }
+type AnalysisActivity = { phase: 'running' | 'completed' | 'partial' | 'failed' | 'clarification'; workflow: string; startedAt: number; duration: number; message?: string; choices?: WorkflowChoice[] }
+type DirectAnswer = { kind: 'answer'; title: string; answer: string; evidence: string[]; period_start: string; period_end: string; data_source: string }
+type AssistantReply = { kind: 'analysis'; run: Run } | DirectAnswer | { kind: 'clarification'; message: string; choices: WorkflowChoice[] }
 
 const scenarios = [
   { key: 'sales_decline', label: 'Sales decline', prompt: 'Why are Harbour Blend Coffee sales falling, and what should I do?' },
@@ -23,6 +29,33 @@ const scenarios = [
 
 const money = (amount: number) => new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD' }).format(amount)
 const time = (value: string) => new Date(value).toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' })
+const workflowChoices = [
+  { key: 'sales_decline', label: 'Sales decline' },
+  { key: 'overstock', label: 'Overstock' },
+  { key: 'demand_spike', label: 'Demand spike' },
+  { key: 'feedback_analysis', label: 'Customer feedback' },
+]
+
+function conciseSummary(value: string): string {
+  const clean = value.trim().replace(/\s+/g, ' ')
+  const firstTwoSentences = clean.split(/(?<=[.!?。！？])\s+/).slice(0, 2).join(' ')
+  if (firstTwoSentences.length <= 280) return firstTwoSentences
+  const shortened = firstTwoSentences.slice(0, 277)
+  return `${shortened.slice(0, shortened.lastIndexOf(' ')).trimEnd()}…`
+}
+
+function focusProduct(products: Product[]): Product | undefined {
+  if (!products.length) return undefined
+  const decline = (product: Product) => product.units_sold_prev_7d > 0
+    ? Math.max(0, (product.units_sold_prev_7d - product.units_sold_7d) / product.units_sold_prev_7d)
+    : 0
+  const lowStock = products.filter((product) => product.stock < 15)
+    .sort((a, b) => a.stock - b.stock || decline(b) - decline(a))
+  if (lowStock.length) return lowStock[0]
+  const declining = products.filter((product) => decline(product) > 0)
+    .sort((a, b) => decline(b) - decline(a))
+  return declining[0] ?? products[0]
+}
 
 async function readJson<T>(response: Response): Promise<T> {
   const raw = await response.text()
@@ -43,6 +76,8 @@ export default function App() {
   const [data, setData] = useState<Dashboard | null>(null)
   const [question, setQuestion] = useState('')
   const [run, setRun] = useState<Run | null>(null)
+  const [directAnswer, setDirectAnswer] = useState<DirectAnswer | null>(null)
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null)
   const [historyRuns, setHistoryRuns] = useState<Run[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [analysisActivity, setAnalysisActivity] = useState<AnalysisActivity | null>(null)
@@ -58,7 +93,6 @@ export default function App() {
   const [session, setSession] = useState<OwnerSession | null>(null)
   const [authError, setAuthError] = useState('')
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
-  const [currentTime, setCurrentTime] = useState(() => new Date())
   const [analysisProductId, setAnalysisProductId] = useState('')
   const [feedbackProductFilter, setFeedbackProductFilter] = useState('all')
   const [feedbackCategoryFilter, setFeedbackCategoryFilter] = useState('all')
@@ -68,6 +102,12 @@ export default function App() {
   const [movementType, setMovementType] = useState<'receipt' | 'write_off'>('receipt')
   const [movementQuantity, setMovementQuantity] = useState('')
   const [movementNote, setMovementNote] = useState('')
+  const [trendProductId, setTrendProductId] = useState('')
+  const [trendDays, setTrendDays] = useState<7 | 14>(14)
+  const [trendMetric, setTrendMetric] = useState<TrendMetric>('quantity')
+  const [productTrend, setProductTrend] = useState<ProductTrend | null>(null)
+  const [trendLoading, setTrendLoading] = useState(false)
+  const [trendError, setTrendError] = useState('')
   const [rejectingRecommendation, setRejectingRecommendation] = useState<Recommendation | null>(null)
   const [rejectionNote, setRejectionNote] = useState('')
   const [decisionBusy, setDecisionBusy] = useState(false)
@@ -85,9 +125,37 @@ export default function App() {
   }
 
   useEffect(() => {
-    const timer = window.setInterval(() => setCurrentTime(new Date()), 60_000)
-    return () => window.clearInterval(timer)
-  }, [])
+    const available = data?.products ?? []
+    if (!available.length) return
+    setTrendProductId((current) => available.some((product) => product.id === current)
+      ? current
+      : focusProduct(available)?.id ?? available[0].id)
+  }, [data?.products])
+
+  useEffect(() => {
+    if (window.location.pathname === '/customer' || !data || !trendProductId) return
+    let ignore = false
+    const requestedDays = activeSection === 'overview' ? 7 : trendDays
+    async function loadTrend() {
+      setTrendLoading(true)
+      setTrendError('')
+      try {
+        const response = await ownerFetch(`/api/products/${encodeURIComponent(trendProductId)}/trend?days=${requestedDays}`)
+        const result = await readJson<ProductTrend>(response)
+        if (!ignore) setProductTrend(result)
+      } catch (e) {
+        if (!ignore) {
+          setProductTrend(null)
+          setTrendError(e instanceof Error ? e.message : 'Could not load product trends.')
+        }
+      } finally {
+        if (!ignore) setTrendLoading(false)
+      }
+    }
+    void loadTrend()
+    return () => { ignore = true }
+  }, [activeSection, data?.data_mode, trendDays, trendProductId])
+
   useEffect(() => {
     if (analysisActivity?.phase !== 'running') return
     const timer = window.setInterval(() => setAnalysisElapsed(Math.floor((Date.now() - analysisActivity.startedAt) / 1000)), 1000)
@@ -137,26 +205,36 @@ export default function App() {
     if (busy) return
     if (prompt.trim().length < 5) { setError('Enter a little more detail so the Manager Agent can scope the analysis.'); return }
     const activity: AnalysisActivity = { phase: 'running', workflow: workflow ?? 'custom analysis', startedAt: Date.now(), duration: 0 }
-    setAnalysisActivity(activity); setAnalysisElapsed(0)
+    setAnalysisActivity(activity); setAnalysisElapsed(0); setDirectAnswer(null)
     setBusy(true); setError(''); setNotice('')
     try {
-      const response = await ownerFetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: prompt, workflow, product_id: analysisProductId || null, simulate_failures: simulateFailure ? ['Marketing Agent'] : [] }) })
-      const body = await readJson<Run>(response)
-      setRun(body); setQuestion(prompt)
-      setAnalysisActivity({ ...activity, phase: body.status === 'partial' ? 'partial' : body.status === 'completed' ? 'completed' : 'failed', duration: Math.floor((Date.now() - activity.startedAt) / 1000) })
+      const response = await ownerFetch('/api/assistant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: prompt, workflow, product_id: analysisProductId || null, simulate_failures: simulateFailure ? ['Marketing Agent'] : [] }) })
+      const body = await readJson<AssistantReply>(response)
+      if (body.kind === 'answer') {
+        setDirectAnswer(body); setRun(null); setQuestion(prompt); setSelectedAgent(null); setAnalysisActivity(null)
+        openSection('agent-runs')
+        await refresh()
+        return
+      }
+      if (body.kind === 'clarification') {
+        setQuestion(prompt)
+        setAnalysisActivity({ ...activity, phase: 'clarification', workflow: 'question routing', duration: Math.floor((Date.now() - activity.startedAt) / 1000), message: body.message, choices: body.choices })
+        return
+      }
+      setDirectAnswer(null)
+      const analysisRun = body.run
+      setRun(analysisRun); setQuestion(prompt); setSelectedAgent(null)
+      setAnalysisActivity({ ...activity, phase: analysisRun.status === 'partial' ? 'partial' : analysisRun.status === 'completed' ? 'completed' : 'failed', duration: Math.floor((Date.now() - activity.startedAt) / 1000) })
       openSection('agent-runs')
       await refresh()
     } catch (e) {
-      setAnalysisActivity({ ...activity, phase: 'failed', duration: Math.floor((Date.now() - activity.startedAt) / 1000), message: e instanceof Error ? e.message : 'Analysis failed.' })
+      const message = e instanceof Error ? e.message : 'Analysis failed.'
+      setAnalysisActivity({ ...activity, phase: 'failed', duration: Math.floor((Date.now() - activity.startedAt) / 1000), message })
     }
     finally { setBusy(false) }
   }
 
   async function decide(rec: Recommendation, decision: 'approve' | 'reject', note = '') {
-    if (decision === 'reject' && !note.trim()) {
-      setError('Enter a reason before rejecting this recommendation.')
-      return
-    }
     setDecisionBusy(true)
     setError('')
     try {
@@ -182,10 +260,6 @@ export default function App() {
     event.preventDefault()
     if (!rejectingRecommendation) return
     const note = rejectionNote.trim()
-    if (!note) {
-      setError('Enter a reason before rejecting this recommendation.')
-      return
-    }
     void decide(rejectingRecommendation, 'reject', note)
   }
 
@@ -210,30 +284,37 @@ export default function App() {
   }
 
   const products = data?.products ?? []
+  const selectedTrendProduct = products.find((product) => product.id === trendProductId) ?? focusProduct(products)
+  const requestedTrendDays = activeSection === 'overview' ? 7 : trendDays
+  const trendMatchesSelection = productTrend?.product_id === selectedTrendProduct?.id && productTrend?.days === requestedTrendDays
   const productInsights = new Map((data?.insights?.products ?? []).map((item) => [item.product_id, item]))
   const feedbackClassifications = new Map((data?.insights?.feedback.classifications ?? []).map((item) => [item.id, item]))
   const escalatedFeedback = new Set((data?.audit ?? []).filter((entry) => entry.event === 'feedback_escalated' && entry.feedback_id).map((entry) => entry.feedback_id))
   const storedRuns = historyRuns ?? data?.runs ?? []
   const allRuns = Array.from(new Map([...(data?.runs ?? []), ...storedRuns, run].filter((item): item is Run => Boolean(item)).map((item) => [item.id, item])).values())
     .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
-  const currentRun = run ?? allRuns[0] ?? null
+  const currentRun = directAnswer ? null : run ?? allRuns[0] ?? null
   const activeRecommendation = currentRun?.recommendations[0]
+  const selectedAgentResult = currentRun?.agents.find((agent) => agent.agent === selectedAgent) ?? null
+  const selectedAgentUnavailable = selectedAgentResult?.status === 'failed'
+  const summaryText = selectedAgentResult
+    ? selectedAgentUnavailable ? 'This agent could not produce a result for this run.' : conciseSummary(selectedAgentResult.summary)
+    : activeRecommendation?.action ?? ''
+  const summaryEvidence = selectedAgentResult ? selectedAgentResult.evidence.slice(0, 2) : activeRecommendation?.evidence.slice(0, 2) ?? []
   const currentUnits = products.reduce((sum, p) => sum + p.units_sold_7d, 0)
   const previousUnits = products.reduce((sum, p) => sum + p.units_sold_prev_7d, 0)
   const unitChange = previousUnits ? Math.round((currentUnits - previousUnits) / previousUnits * 100) : 0
-  const currentRevenue = products.reduce((sum, p) => sum + p.units_sold_7d * p.price, 0)
-  const previousRevenue = products.reduce((sum, p) => sum + p.units_sold_prev_7d * p.price, 0)
+  const currentRevenue = products.reduce((sum, p) => sum + (p.revenue_7d ?? p.units_sold_7d * p.price), 0)
+  const previousRevenue = products.reduce((sum, p) => sum + (p.revenue_prev_7d ?? p.units_sold_prev_7d * p.price), 0)
   const revenueChange = previousRevenue ? Math.round((currentRevenue - previousRevenue) / previousRevenue * 100) : 0
   const approvals = allRuns.flatMap((item) => item.recommendations.filter((recommendation) => recommendation.high_risk && recommendation.status === 'pending_approval').map((recommendation) => ({ run: item, recommendation })))
   const supabaseMode = data?.data_mode === 'supabase' || data?.data_mode === 'supabase_llm'
   const llmMode = data?.data_mode === 'llm' || data?.data_mode === 'supabase_llm'
   const dataSourceTitle = supabaseMode ? (llmMode ? 'Supabase data · Qwen analysis' : 'Supabase database is active') : (llmMode ? 'Qwen analysis is active' : 'Demo data is active')
-  const dataSourceDescription = supabaseMode ? 'Products, sales and feedback are loaded from your Supabase project. Seeded business records are illustrative.' : (llmMode ? 'Qwen analyses illustrative sample records only; nothing is connected to a live store.' : 'These figures are illustrative sample records. Nothing here is connected to a live store.')
+  const reportDate = data?.business_as_of_date ?? '2026-11-04'
+  const dataSourceDescription = `${supabaseMode ? 'Products, sales and feedback are loaded from your Supabase project. ' : ''}Illustrative reporting date: ${new Date(`${reportDate}T12:00:00`).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}. Figures are sample records, not live store data.`
   const dataSourceTag = supabaseMode ? (llmMode ? 'SUPABASE · QWEN' : 'SUPABASE') : (llmMode ? 'LLM · DEMO DATA' : 'LOCAL DEMO')
-  const sectionTitle: Record<WorkspaceSection, string> = { overview: 'Overview', 'agent-runs': 'Agent runs', approvals: 'Approvals', 'customer-voice': 'Customer voice' }
-  const greeting = currentTime.getHours() < 12 ? 'Good morning' : currentTime.getHours() < 18 ? 'Good afternoon' : 'Good evening'
-  const ownerFirstName = (session?.name ?? 'Jordan').split(' ')[0]
-  const maxSales = Math.max(...products.map((product) => product.units_sold_7d), 1)
+  const sectionTitle: Record<WorkspaceSection, string> = { overview: 'Overview', 'product-trends': 'Product trends', 'agent-runs': 'Agent runs', approvals: 'Approvals', 'customer-voice': 'Customer voice' }
   const visibleFeedback = (data?.feedback ?? []).filter((item) => (feedbackProductFilter === 'all' || item.product_id === feedbackProductFilter) && (feedbackCategoryFilter === 'all' || item.category === feedbackCategoryFilter) && (!feedbackOnlyEscalated || escalatedFeedback.has(item.id)))
 
   async function signIn(email: string, password: string) {
@@ -265,6 +346,7 @@ export default function App() {
       <div className="nav-label">WORKSPACE</div>
       <nav onMouseLeave={() => setHoveredSection(null)}>
         <button className={`nav-item ${activeSection === 'overview' ? 'active' : ''} ${hoveredSection === 'overview' ? 'hovered' : ''}`} onMouseEnter={() => setHoveredSection('overview')} onClick={() => openSection('overview')}><LayoutDashboard size={17}/> Overview</button>
+        <button className={`nav-item ${activeSection === 'product-trends' ? 'active' : ''} ${hoveredSection === 'product-trends' ? 'hovered' : ''}`} onMouseEnter={() => setHoveredSection('product-trends')} onClick={() => openSection('product-trends')}><BarChart3 size={17}/> Product trends</button>
         <button className={`nav-item ${activeSection === 'agent-runs' ? 'active' : ''} ${hoveredSection === 'agent-runs' ? 'hovered' : ''}`} onMouseEnter={() => setHoveredSection('agent-runs')} onClick={() => openSection('agent-runs')}><Activity size={17}/> Agent runs <span className="nav-count">{allRuns.length}</span></button>
         <button className={`nav-item ${activeSection === 'approvals' ? 'active' : ''} ${hoveredSection === 'approvals' ? 'hovered' : ''}`} onMouseEnter={() => setHoveredSection('approvals')} onClick={() => openSection('approvals')}><ShieldCheck size={17}/> Approvals {approvals.length > 0 && <i className="nav-dot"/>}</button>
         <button className={`nav-item ${activeSection === 'customer-voice' ? 'active' : ''} ${hoveredSection === 'customer-voice' ? 'hovered' : ''}`} onMouseEnter={() => setHoveredSection('customer-voice')} onClick={() => openSection('customer-voice')}><MessageSquareText size={17}/> Customer voice</button>
@@ -278,14 +360,15 @@ export default function App() {
         {notice && <div className="alert success"><Check size={16}/>{notice}<button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}
         {analysisActivity && <div className={`analysis-activity ${analysisActivity.phase}`} role="status">
           <span className="analysis-activity-icon">{analysisActivity.phase === 'completed' ? <Check size={16}/> : analysisActivity.phase === 'failed' ? <X size={16}/> : <Clock3 size={16}/>}</span>
-          <div><b>{analysisActivity.phase === 'running' ? 'Analysis in progress' : analysisActivity.phase === 'completed' ? 'Analysis completed' : analysisActivity.phase === 'partial' ? 'Partial analysis completed' : 'Analysis failed'}</b>
+          <div><b>{analysisActivity.phase === 'running' ? 'Analysis in progress' : analysisActivity.phase === 'completed' ? 'Analysis completed' : analysisActivity.phase === 'partial' ? 'Partial analysis completed' : analysisActivity.phase === 'clarification' ? 'Choose an analysis focus' : 'Analysis failed'}</b>
             <span>{analysisActivity.workflow.replace(/_/g, ' ')} · {analysisActivity.phase === 'running' ? 'Waiting for the API response' : `Finished in ${analysisActivity.duration}s`}</span>
-            <p>{analysisActivity.phase === 'running' ? 'The server is processing the specialist and Manager requests. Results and agent statuses appear after the API responds; keep this tab open.' : analysisActivity.message ?? (analysisActivity.phase === 'partial' ? 'Some agents were unavailable. Check the result and limitations before using the recommendation.' : analysisActivity.phase === 'failed' ? 'The server returned a failed analysis. Check the result and API logs.' : 'Open the result to review evidence, recommendations and approval controls.')}</p>
+            <p>{analysisActivity.phase === 'running' ? 'The server is processing the specialist and Manager requests. Results and agent statuses appear after the API responds; keep this tab open.' : analysisActivity.message ?? (analysisActivity.phase === 'partial' ? 'Some agents were unavailable. Check the result and limitations before using the recommendation.' : analysisActivity.phase === 'failed' ? 'The server returned a failed analysis. Check the result and API logs.' : analysisActivity.phase === 'clarification' ? 'Your question is still here. Choose the closest workflow and we will use it as the analysis focus.' : 'Open the result to review evidence, recommendations and approval controls.')}</p>
+            {analysisActivity.phase === 'clarification' && <div className="workflow-clarification"><span>Choose a workflow to continue:</span><div>{(analysisActivity.choices ?? workflowChoices).map((choice) => <button key={choice.key} onClick={() => { setSelectedAgent(null); void analyze(question, choice.key) }}>{choice.label}</button>)}</div></div>}
           </div>
-          {analysisActivity.phase === 'running' ? <span className="analysis-timer" aria-label="Elapsed time">{analysisElapsed}s elapsed</span> : run && analysisActivity.phase !== 'failed' ? <button className="text-button" onClick={() => openSection('agent-runs')}>View result <ArrowUpRight size={13}/></button> : null}
+          {analysisActivity.phase === 'running' ? <span className="analysis-timer" aria-label="Elapsed time">{analysisElapsed}s elapsed</span> : run && analysisActivity.phase !== 'failed' && analysisActivity.phase !== 'clarification' ? <button className="text-button" onClick={() => openSection('agent-runs')}>View result <ArrowUpRight size={13}/></button> : null}
         </div>}
         <div className="workspace-module overview-module">
-        <div className="page-heading" id="overview"><div><div className="eyebrow">STORE OPERATIONS <span>·</span> SYDNEY, AU</div><h1>{greeting}, {ownerFirstName} <span>✳</span></h1><p>Here’s what’s happening across your store today.</p></div><button className="date-filter" onClick={()=>setNotice('All sales comparisons use the latest 7 days against the preceding 7 days.')}><Clock3 size={15}/> Last 7 days <ChevronDown size={14}/></button></div>
+        <div className="page-heading" id="overview"><div><div className="eyebrow">BUSINESS OVERVIEW <span>·</span> SYDNEY, AU</div><h1>Store performance</h1></div><button className="date-filter" onClick={()=>setNotice('All sales comparisons use the latest 7 days against the preceding 7 days.')}><Clock3 size={15}/> Last 7 days <ChevronDown size={14}/></button></div>
         <div className="demo-banner"><div className="demo-icon"><Database size={16}/></div><div><b>{dataSourceTitle}</b><span>{dataSourceDescription}</span></div><span className="demo-tag">{dataSourceTag}</span></div>
         <section className="metric-grid">
           <Metric title="Sales · last 7 days" value={money(currentRevenue)} change={`${Math.abs(revenueChange)}%`} down={revenueChange < 0} note="vs previous 7 days" icon="↘" tone="sage"/>
@@ -298,7 +381,7 @@ export default function App() {
           <section className="panel analysis-panel">
             <div className="panel-heading"><div><div className="section-kicker"><Sparkles size={14}/> AI BUSINESS ASSISTANT</div><h2>What would you like to work on?</h2><p>Ask a question or start with a common workflow.</p></div><span className="manager-badge"><i/> Manager ready</span></div>
             <div className="composer"><textarea value={question} onChange={(e)=>setQuestion(e.target.value)} onKeyDown={(e)=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();void analyze()}}} placeholder="e.g. Why are my coffee sales slowing down?" rows={2}/><div className="scope-row"><label>Focus product <select value={analysisProductId} onChange={(event)=>setAnalysisProductId(event.target.value)}><option value="">All available products</option>{products.map((product)=><option value={product.id} key={product.id}>{product.name}</option>)}</select></label><span>Optional scope narrows the evidence used in this run.</span></div><div className="composer-bottom"><label className="failure-toggle"><input type="checkbox" checked={simulateFailure} onChange={(event)=>setSimulateFailure(event.target.checked)} /> Demonstrate a missing Marketing Agent result</label><button className="primary-button" disabled={busy} onClick={()=>void analyze()}><Play size={14} fill="currentColor"/>{busy?'Analysing…':'Run analysis'}</button></div></div>
-            <div className="scenario-row">{scenarios.map((s)=><button key={s.key} className="scenario-chip" disabled={busy} onClick={()=>void analyze(s.prompt,s.key)}><span className={`scenario-dot ${s.key}`}/>{s.label}<ArrowUpRight size={12}/></button>)}</div>
+            <div className="scenario-row">{scenarios.map((s)=><button key={s.key} className="scenario-chip" disabled={busy} onClick={()=>{setQuestion(s.prompt);setAnalysisProductId('');setDirectAnswer(null);setAnalysisActivity(null)}} title="Fill the question; press Run analysis when ready"><span className={`scenario-dot ${s.key}`}/>{s.label}<ArrowUpRight size={12}/></button>)}</div>
           </section>
           <section className="panel watch-panel"><div className="panel-title-row"><div><div className="section-kicker">STORE PULSE</div><h2>Needs a closer look</h2></div><a className="text-button" href="#inventory">View all <ArrowUpRight size={13}/></a></div>
             {products.filter(p=>p.stock<15 || p.units_sold_7d<p.units_sold_prev_7d).map(p=>{const insight=productInsights.get(p.id);return <div className="watch-item" key={p.id}><div className="product-icon">{p.category==='Wellness'?'✳':'◉'}</div><div className="watch-info"><b>{p.name}</b><span>{insight?.estimated_cover_days != null ? `${insight.estimated_cover_days} days cover · ${insight.risk.replace(/_/g,' ')}` : `${p.units_sold_7d} sold this week`}</span></div><span className={`trend ${p.units_sold_7d<p.units_sold_prev_7d?'negative':'positive'}`}>{p.units_sold_7d<p.units_sold_prev_7d?<ArrowDownRight size={14}/>:<ArrowUpRight size={14}/>} {insight ? `${insight.weekly_change_percent > 0 ? '+' : ''}${insight.weekly_change_percent}%` : p.units_sold_7d-p.units_sold_prev_7d}</span></div>})}
@@ -306,23 +389,48 @@ export default function App() {
           </section>
         </div>
 
-        <section className="panel performance-panel"><div className="panel-title-row"><div><div className="section-kicker">EXPLAINABLE VIEW</div><h2>7-day unit sales by product</h2></div><span className="workflow-pill">not a forecast</span></div><div className="performance-chart">{products.map((product) => <div className="performance-row" key={product.id}><span>{product.name}</span><div className="performance-track"><i style={{ width: `${Math.max(4, product.units_sold_7d / maxSales * 100)}%` }}/></div><b>{product.units_sold_7d}</b></div>)}</div><p className="chart-note">Bars compare the latest 7-day sales records only. Use the product scope above to ask a follow-up question on one item.</p></section>
+        <section className="panel product-trend-preview">
+          <div className="panel-title-row"><div><div className="section-kicker">PRODUCT TRENDS</div><h2>{selectedTrendProduct?.name ?? 'Select a product'}</h2></div><div className="trend-preview-actions">
+            <select aria-label="Product to monitor" value={selectedTrendProduct?.id ?? ''} onChange={(event)=>setTrendProductId(event.target.value)}>{products.map((product)=><option value={product.id} key={product.id}>{product.name}</option>)}</select>
+            <MetricToggle value={trendMetric} onChange={setTrendMetric}/>
+            <button className="text-button" onClick={()=>openSection('product-trends')}>View trends <ArrowUpRight size={14}/></button>
+          </div></div>
+          {selectedTrendProduct ? <div className="trend-preview-grid"><div className="trend-preview-chart"><div className="trend-chart-caption"><span>Daily {trendMetric === 'quantity' ? 'units sold' : 'sales revenue'} · last 7 days</span><span>{productTrend?.sales_source === 'recorded' ? 'Recorded sales' : productTrend?.sales_source === 'illustrative' ? 'Illustrative demo data' : 'Loading trend…'}</span></div>{trendError ? <div className="trend-state error-text">{trendError}</div> : trendLoading && !trendMatchesSelection ? <div className="trend-state">Loading sales trend…</div> : trendMatchesSelection && productTrend ? <SalesTrendChart points={productTrend.sales} metric={trendMetric} compact/> : <div className="trend-state">Sales trend will appear here.</div>}</div>
+            <div className="trend-stock-summary"><span className="section-kicker">CURRENT STOCK</span><strong>{selectedTrendProduct.stock}<small> units</small></strong><span className={`stock-badge ${selectedTrendProduct.stock<15?'low':''}`}>{selectedTrendProduct.stock<15?'Low stock':'In stock'}</span><button className="text-button" onClick={()=>openSection('product-trends')}>Stock change log <ArrowUpRight size={13}/></button></div></div>
+          : <div className="trend-state">Product data is not available.</div>}
+        </section>
 
         <div className="bottom-grid"><section className="panel inventory-panel" id="inventory"><div className="panel-title-row"><div><div className="section-kicker">PRODUCT SNAPSHOT</div><h2>Inventory & sales</h2></div><button className="text-button" onClick={()=>setMovementOpen((open)=>!open)}>{movementOpen ? 'Close movement form' : 'Record movement'} <ArrowUpRight size={13}/></button></div>{movementOpen && <form className="movement-form" onSubmit={(event)=>void recordMovement(event)}><label>Product<select value={movementProductId} onChange={(event)=>setMovementProductId(event.target.value)}>{products.map((product)=><option value={product.id} key={product.id}>{product.name}</option>)}</select></label><label>Type<select value={movementType} onChange={(event)=>setMovementType(event.target.value as 'receipt' | 'write_off')}><option value="receipt">Stock receipt (+)</option><option value="write_off">Write-off (−)</option></select></label><label>Units<input type="number" min="1" step="1" value={movementQuantity} onChange={(event)=>setMovementQuantity(event.target.value)} required /></label><label className="movement-note">Note (optional)<input value={movementNote} maxLength={500} onChange={(event)=>setMovementNote(event.target.value)} /></label><button className="primary-button">Save record</button></form>}<div className="table-wrap"><table><thead><tr><th>PRODUCT</th><th>PRICE</th><th>IN STOCK</th><th>7D SALES</th><th>VS LAST WEEK</th></tr></thead><tbody>{products.map(p=><tr key={p.id}><td><div className="table-product"><span className="table-emoji">{p.category==='Wellness'?'✳':'◉'}</span><span><b>{p.name}</b><small>{p.category}</small></span></div></td><td>{money(p.price)}</td><td><span className={`stock-badge ${p.stock<15?'low':''}`}>{p.stock} units</span></td><td>{p.units_sold_7d} units</td><td><span className={`change-text ${p.units_sold_7d<p.units_sold_prev_7d?'down':'up'}`}>{p.units_sold_7d<p.units_sold_prev_7d?<ArrowDownRight size={13}/>:<ArrowUpRight size={13}/>} {Math.round(Math.abs((p.units_sold_7d-p.units_sold_prev_7d)/Math.max(1,p.units_sold_prev_7d))*100)}%</span></td></tr>)}</tbody></table></div>{data?.movements?.length ? <div className="movement-history"><b>Recent manual stock records</b>{data.movements.slice(0,3).map((movement)=><span key={movement.id}>{movement.product_name} · {movement.movement_type === 'receipt' ? '+' : ''}{movement.quantity} · {new Date(movement.occurred_at).toLocaleDateString('en-AU')}</span>)}</div> : null}</section>
           <section className="panel audit-panel"><div className="panel-title-row"><div><div className="section-kicker">TRACEABILITY</div><h2>Recent activity</h2></div><button className="icon-button subtle" aria-label="Activity"><Activity size={16}/></button></div><div className="audit-list">{(data?.audit ?? []).slice(-4).reverse().map((entry)=><div className="audit-item" key={entry.id}><span className="audit-icon"><Check size={12}/></span><div><b>{entry.summary}</b><span>{new Date(entry.created_at).toLocaleString('en-AU',{hour:'2-digit',minute:'2-digit',day:'numeric',month:'short'})}</span></div></div>)}{!data?.audit?.length&&<div className="audit-empty">Analysis runs and owner decisions will be time-stamped here.</div>}</div></section></div>
         </div>
 
+        <div className="workspace-module product-trends-module">
+          <section className="panel product-trends-panel">
+            <div className="panel-title-row trend-page-heading"><div><div className="section-kicker">PRODUCT TRENDS</div><h2>{selectedTrendProduct?.name ?? 'Product history'}</h2><p>Reporting period ends {new Date(`${reportDate}T12:00:00`).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</p></div><span className="trend-source-pill">{productTrend?.sales_source === 'recorded' ? 'Recorded database sales' : 'Illustrative demo data'}</span></div>
+            <div className="trend-controls">
+              <label>Product<select aria-label="Select product" value={selectedTrendProduct?.id ?? ''} onChange={(event)=>setTrendProductId(event.target.value)}>{products.map((product)=><option value={product.id} key={product.id}>{product.name}</option>)}</select></label>
+              <div className="trend-control-group"><span>Period</span><div className="segmented-control"><button className={trendDays===7?'selected':''} aria-pressed={trendDays===7} onClick={()=>setTrendDays(7)}>7 days</button><button className={trendDays===14?'selected':''} aria-pressed={trendDays===14} onClick={()=>setTrendDays(14)}>14 days</button></div></div>
+              <div className="trend-control-group"><span>Measure</span><MetricToggle value={trendMetric} onChange={setTrendMetric}/></div>
+            </div>
+            {selectedTrendProduct ? <>
+              <div className="trend-summary-cards"><div><span>Current stock</span><strong>{selectedTrendProduct.stock}<small> units</small></strong><em className={selectedTrendProduct.stock<15?'low':''}>{selectedTrendProduct.stock<15?'Low stock':'Available'}</em></div><div><span>{trendDays}-day {trendMetric === 'quantity' ? 'units sold' : 'sales revenue'}</span><strong>{trendMatchesSelection && productTrend ? trendMetric==='quantity' ? productTrend.sales.reduce((sum,point)=>sum+point.quantity,0).toLocaleString() : money(productTrend.sales.reduce((sum,point)=>sum+point.revenue,0)) : '—'}</strong><em>{productTrend?.sales_source==='recorded'?'Database records':productTrend?.sales_source==='illustrative'?'Illustrative distribution':'Loading'}</em></div><div><span>Recorded stock movements</span><strong>{productTrend?.product_id===selectedTrendProduct.id ? productTrend.movements.length : '—'}</strong><em>Receipts and write-offs</em></div></div>
+              <section className="panel trend-chart-panel"><div className="trend-section-heading"><div><h3>Sales over time</h3><p>{productTrend?.sales_source==='recorded'?'Daily totals from saved sales records.':'Demo values are an illustrative distribution of the existing weekly totals.'}</p></div></div>{trendError ? <div className="trend-state error-text">{trendError}</div> : trendLoading && !trendMatchesSelection ? <div className="trend-state">Loading product history…</div> : trendMatchesSelection && productTrend ? <SalesTrendChart points={productTrend.sales} metric={trendMetric}/> : <div className="trend-state">Select a product to view its sales history.</div>}</section>
+              <section className="panel movement-timeline-panel"><div className="trend-section-heading"><div><h3>Inventory changes</h3><p>Current stock is shown above. This timeline includes only movements recorded in the prototype.</p></div></div>{productTrend?.product_id===selectedTrendProduct.id && productTrend.movements.length ? <div className="movement-timeline">{productTrend.movements.map((movement)=><article className="movement-event" key={movement.id}><span className={`movement-event-mark ${movement.movement_type==='receipt'?'receipt':'write-off'}`}>{movement.movement_type==='receipt'?'+':'−'}</span><div><b>{movement.movement_type==='receipt'?'Stock received':'Stock written off'}</b><span>{movement.note || 'No note added'}</span></div><strong className={movement.movement_type==='receipt'?'positive':'negative'}>{movement.movement_type==='receipt'?'+':'−'}{Math.abs(movement.quantity)} units</strong><time>{new Date(movement.occurred_at).toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'})}</time></article>)}</div> : <div className="trend-state">No recorded stock movements for this product yet.</div>}</section>
+            </> : <div className="trend-state">Product data is not available.</div>}
+          </section>
+        </div>
+
         <div className="workspace-module agent-runs-module">
-        <section className="panel run-panel"><div className="panel-title-row run-title"><div><div className="section-kicker">LATEST ANALYSIS</div><h2>{currentRun ? currentRun.recommendations[0]?.title : 'Your analysis workspace'}</h2></div>{currentRun && <span className={`complete-badge ${currentRun.status}`}>{currentRun.status === 'completed' ? <Check size={13}/> : <CircleHelp size={13}/>} {currentRun.status}</span>}</div>
-          {currentRun ? <><div className="run-meta"><span><span className="workflow-pill">{currentRun.workflow.replace('_',' ')}</span></span><span>Started {time(currentRun.created_at)}</span><span className="meta-dot">·</span><span>{currentRun.agents.length} specialist agents</span>{currentRun.scope?.product_name && <><span className="meta-dot">·</span><span>Focused on {currentRun.scope.product_name}</span></>}<span className="meta-spacer"/><span className="demo-inline"><Database size={13}/>{currentRun.data_mode === 'supabase_llm' ? 'Supabase · Qwen' : currentRun.data_mode === 'supabase' ? 'Supabase records' : currentRun.data_mode === 'llm' ? 'Qwen · demo records' : 'Demo data'}</span></div>
-            <div className="agent-track">{currentRun.agents.map((a,i)=><div className="agent-step" key={a.agent}><div className={`step-icon ${a.status}`}>{a.status === 'failed' ? <X size={13}/> : <Check size={13}/>}</div>{i<currentRun.agents.length-1&&<div className="step-line"/>}<div><b>{a.agent.replace(' Agent','')}</b><span>{a.status}</span></div></div>)}</div>
-            <div className="result-grid"><div className="result-summary"><div className="section-kicker">MANAGER SUMMARY</div><p>{currentRun.recommendations[0]?.action}</p><div className="evidence-list">{currentRun.recommendations[0]?.evidence.slice(0,2).map((e)=><span key={e}><Check size={13}/>{e}</span>)}</div><div className="confidence"><span>Confidence</span><b>{currentRun.recommendations[0]?.confidence}</b></div></div>
+        <section className="panel run-panel"><div className="panel-title-row run-title"><div><div className="section-kicker">LATEST ANALYSIS</div><h2>{directAnswer?.title ?? (currentRun ? currentRun.recommendations[0]?.title : 'Your analysis workspace')}</h2></div>{directAnswer ? <span className="complete-badge completed"><Check size={13}/> Data answer</span> : currentRun && <span className={`complete-badge ${currentRun.status}`}>{currentRun.status === 'completed' ? <Check size={13}/> : <CircleHelp size={13}/>} {currentRun.status}</span>}</div>
+          {directAnswer ? <div className="data-answer"><div className="run-meta"><span>Question</span><b>{question}</b><span className="meta-spacer"/><span className="demo-inline"><Database size={13}/>{directAnswer.data_source}</span></div><p>{directAnswer.answer}</p><div className="data-answer-evidence"><b>Compared products</b>{directAnswer.evidence.map((item)=><span key={item}><Check size={13}/>{item}</span>)}</div><small>Period: {directAnswer.period_start} to {directAnswer.period_end} · Direct database calculation; no LLM or agents used.</small></div> : currentRun ? <><div className="run-meta"><span><span className="workflow-pill">{currentRun.workflow.replace('_',' ')}</span></span><span>Started {time(currentRun.created_at)}</span><span className="meta-dot">·</span><span>{currentRun.agents.length} specialist agents</span>{currentRun.scope?.product_name && <><span className="meta-dot">·</span><span>Focused on {currentRun.scope.product_name}</span></>}<span className="meta-spacer"/><span className="demo-inline"><Database size={13}/>{currentRun.data_mode === 'supabase_llm' ? 'Supabase · Qwen' : currentRun.data_mode === 'supabase' ? 'Supabase records' : currentRun.data_mode === 'llm' ? 'Qwen · demo records' : 'Demo data'}</span></div>
+            <div className="agent-track" role="group" aria-label="Select an agent summary">{currentRun.agents.map((a,i)=><button type="button" className={`agent-step ${selectedAgent === a.agent ? 'selected' : ''}`} aria-pressed={selectedAgent === a.agent} key={a.agent} onClick={() => setSelectedAgent(a.agent)}><span className={`step-icon ${a.status}`}>{a.status === 'failed' ? <X size={13}/> : <Check size={13}/>}</span>{i<currentRun.agents.length-1&&<span className="step-line"/>}<span className="agent-step-label"><b>{a.agent.replace(' Agent','')}</b><span>{a.status}</span></span></button>)}</div>
+            <div className="result-grid"><div className="result-summary"><div className="summary-view-heading"><div className="section-kicker">{selectedAgentResult ? `${selectedAgentResult.agent.replace(' Agent','').toUpperCase()} AGENT SUMMARY` : 'MANAGER SUMMARY'}</div>{selectedAgentResult && <button type="button" className="manager-summary-link" onClick={() => setSelectedAgent(null)}>Manager summary</button>}</div><p>{summaryText}</p><div className="evidence-list">{summaryEvidence.map((e)=><span key={e}><Check size={13}/>{e}</span>)}{selectedAgentUnavailable && <span>No supporting evidence is available.</span>}</div>{selectedAgentResult?.limitations.length ? <div className="agent-note"><b>Agent note</b>{selectedAgentResult.limitations[0]}</div> : !selectedAgentResult && <div className="confidence"><span>Confidence</span><b>{activeRecommendation?.confidence}</b></div>}</div>
               <div className="recommendation-card"><div className="recommendation-head"><div className="recommendation-icon"><Sparkles size={16}/></div><div><span className="section-kicker">PRIORITY · {activeRecommendation?.priority.toUpperCase()}</span><b>{activeRecommendation?.title}</b></div></div><p>{activeRecommendation?.approval_note}</p>{activeRecommendation?.high_risk&&activeRecommendation.status==='pending_approval'?<div className="approval-actions"><button className="approve-button" disabled={decisionBusy} onClick={()=>void decide(activeRecommendation,'approve')}><Check size={14}/> Approve</button><button className="reject-button" disabled={decisionBusy} onClick={()=>openRejectForm(activeRecommendation)}><X size={14}/> Reject</button></div>:<span className={`status-label ${activeRecommendation?.status}`}>{activeRecommendation?.status.replace('_',' ')}</span>}</div></div>
             <div className="limitations"><span><CircleHelp size={14}/><b>Limitations</b></span>{currentRun.limitations.join(' ')}</div>
           </> : <div className="run-empty"><div className="empty-orbit"><Sparkles size={20}/></div><div><b>Your agents are ready when you are.</b><span>Start a workflow above to see a transparent, evidence-led analysis with approval controls.</span></div></div>}
         </section>
 
-        <section className="panel history-panel" id="agent-runs"><div className="panel-title-row"><div><div className="section-kicker">ANALYSIS HISTORY</div><h2>Agent runs</h2></div><span className="workflow-pill">{allRuns.length} saved</span></div><div className="history-list">{allRuns.length ? allRuns.map((item)=><button className={`history-item ${currentRun?.id === item.id ? 'selected' : ''}`} aria-current={currentRun?.id === item.id ? 'true' : undefined} key={item.id} onClick={()=>{setRun(item); setAnalysisActivity(null); openSection('agent-runs')}}><span className={`history-status ${item.status}`}>{item.status}</span><span><b>{item.recommendations[0]?.title ?? item.workflow}</b><small>{item.workflow.replace('_',' ')} · {new Date(item.created_at).toLocaleString('en-AU')}</small></span><ArrowUpRight size={14}/></button>) : <div className="audit-empty">Start an analysis to create a traceable agent run.</div>}</div></section>
+        <section className="panel history-panel" id="agent-runs"><div className="panel-title-row"><div><div className="section-kicker">ANALYSIS HISTORY</div><h2>Agent runs</h2></div><span className="workflow-pill">{allRuns.length} saved</span></div><div className="history-list">{allRuns.length ? allRuns.map((item)=><button className={`history-item ${currentRun?.id === item.id ? 'selected' : ''}`} aria-current={currentRun?.id === item.id ? 'true' : undefined} key={item.id} onClick={()=>{setRun(item); setDirectAnswer(null); setSelectedAgent(null); setAnalysisActivity(null); openSection('agent-runs')}}><span className={`history-status ${item.status}`}>{item.status}</span><span><b>{item.recommendations[0]?.title ?? item.workflow}</b><small>{item.workflow.replace('_',' ')} · {new Date(item.created_at).toLocaleString('en-AU')}</small></span><ArrowUpRight size={14}/></button>) : <div className="audit-empty">Start an analysis to create a traceable agent run.</div>}</div></section>
         </div>
 
         <div className="workspace-module approvals-module">
@@ -340,12 +448,44 @@ export default function App() {
         </div>
         <footer className="page-footer"><span><ShieldCheck size={14}/> AI outputs are advisory. You remain in control of every business decision.</span><span>SoloRetail AI · Stage 2 Prototype</span></footer>
       </div>
-      {rejectingRecommendation && <div className="dialog-backdrop"><section className="rejection-dialog" role="dialog" aria-modal="true" aria-labelledby="rejection-title"><div className="section-kicker">HUMAN OVERSIGHT</div><h2 id="rejection-title">Reject recommendation</h2><p>{rejectingRecommendation.title}</p><form onSubmit={submitRejection}><label htmlFor="rejection-note">Reason for rejection</label><textarea id="rejection-note" value={rejectionNote} onChange={(event)=>setRejectionNote(event.target.value)} maxLength={500} rows={4} placeholder="Explain why this recommendation was rejected." autoFocus required /><div className="rejection-note-count">{rejectionNote.length}/500</div><div className="rejection-dialog-actions"><button type="button" className="reject-button" disabled={decisionBusy} onClick={()=>{setRejectingRecommendation(null);setRejectionNote('')}}>Cancel</button><button type="submit" className="approve-button" disabled={decisionBusy || !rejectionNote.trim()}>{decisionBusy ? 'Saving…' : 'Confirm rejection'}</button></div></form></section></div>}
+      {rejectingRecommendation && <div className="dialog-backdrop"><section className="rejection-dialog" role="dialog" aria-modal="true" aria-labelledby="rejection-title"><div className="section-kicker">HUMAN OVERSIGHT</div><h2 id="rejection-title">Reject recommendation</h2><p>{rejectingRecommendation.title}</p><form onSubmit={submitRejection}><label htmlFor="rejection-note">Reason for rejection <span>(optional)</span></label><textarea id="rejection-note" value={rejectionNote} onChange={(event)=>setRejectionNote(event.target.value)} maxLength={500} rows={4} placeholder="Add a note (optional)." autoFocus /><div className="rejection-note-count">{rejectionNote.length}/500</div><div className="rejection-dialog-actions"><button type="button" className="reject-button" disabled={decisionBusy} onClick={()=>{setRejectingRecommendation(null);setRejectionNote('')}}>Cancel</button><button type="submit" className="approve-button" disabled={decisionBusy}>{decisionBusy ? 'Saving…' : 'Confirm rejection'}</button></div></form></section></div>}
     </main>
   </div>
 }
 
 function Metric({title,value,change,note,icon,tone,down}:{title:string;value:string;change:string;note:string;icon:string;tone:string;down?:boolean}) { return <div className="metric-card"><div className="metric-top"><span>{title}</span><i className={`metric-icon ${tone}`}>{icon}</i></div><strong>{value}</strong><div className="metric-foot"><span className={down?'metric-down':'metric-up'}>{down?<ArrowDownRight size={13}/>:<ArrowUpRight size={13}/>} {change}</span><span>{note}</span></div></div> }
+
+function MetricToggle({value,onChange}:{value:TrendMetric;onChange:(value:TrendMetric)=>void}) {
+  return <div className="segmented-control metric-toggle"><button className={value==='quantity'?'selected':''} aria-pressed={value==='quantity'} onClick={()=>onChange('quantity')}>Units</button><button className={value==='revenue'?'selected':''} aria-pressed={value==='revenue'} onClick={()=>onChange('revenue')}>Revenue</button></div>
+}
+
+function SalesTrendChart({points,metric,compact=false}:{points:SalesPoint[];metric:TrendMetric;compact?:boolean}) {
+  if (!points.length) return <div className="trend-state">No sales data is available for this period.</div>
+  const width=760
+  const height=compact?220:310
+  const left=62, right=20, top=18, bottom=43
+  const plotWidth=width-left-right
+  const plotHeight=height-top-bottom
+  const values=points.map((point)=>metric==='quantity'?point.quantity:point.revenue)
+  const maxValue=Math.max(...values,1)
+  const coords=values.map((value,index)=>({
+    x:left+(points.length===1?plotWidth/2:index*plotWidth/(points.length-1)),
+    y:top+plotHeight-(value/maxValue)*plotHeight,
+    value,
+  }))
+  const coordinateString=coords.map((point)=>`${point.x},${point.y}`).join(' ')
+  const formatValue=(value:number)=>metric==='quantity'?Math.round(value).toLocaleString('en-AU'):money(value)
+  const labelStep=points.length>9?2:1
+  const dateLabel=(value:string)=>new Date(`${value}T12:00:00`).toLocaleDateString('en-AU',{day:'numeric',month:'short'})
+  return <div className={`sales-chart ${compact?'compact':''}`}>
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${metric==='quantity'?'Units sold':'Sales revenue'} by day`}>
+      {[0,0.5,1].map((ratio)=><g key={ratio}><line className="chart-grid-line" x1={left} x2={width-right} y1={top+plotHeight*(1-ratio)} y2={top+plotHeight*(1-ratio)}/><text className="chart-axis-label" x={left-10} y={top+plotHeight*(1-ratio)+4} textAnchor="end">{formatValue(maxValue*ratio)}</text></g>)}
+      <polygon className="chart-area" points={`${left},${top+plotHeight} ${coordinateString} ${width-right},${top+plotHeight}`}/>
+      <polyline className="chart-line" points={coordinateString}/>
+      {coords.map((point,index)=><g key={points[index].date}><circle className="chart-point" cx={point.x} cy={point.y} r={compact?4:5}><title>{dateLabel(points[index].date)} · {formatValue(point.value)}</title></circle>{(index%labelStep===0||index===points.length-1)&&<text className="chart-date-label" x={point.x} y={height-13} textAnchor="middle">{dateLabel(points[index].date)}</text>}</g>)}
+    </svg>
+  </div>
+}
 
 function AuthLoading() {
   return <main className="auth-page"><div className="auth-card auth-loading"><span className="brand-mark"><ShoppingBag size={20}/></span><b>Preparing your owner workspace…</b></div></main>
