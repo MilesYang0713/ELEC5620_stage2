@@ -55,11 +55,8 @@ class DecisionRequest(BaseModel):
 
     @field_validator("note")
     @classmethod
-    def require_rejection_reason(cls, value: str, info) -> str:
-        note = value.strip()
-        if info.data.get("decision") == "reject" and not note:
-            raise ValueError("Enter a reason before rejecting this recommendation.")
-        return note
+    def trim_note(cls, value: str) -> str:
+        return value.strip()
 
 
 class OwnerLogin(BaseModel):

@@ -2,15 +2,29 @@
 
 import json
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 
 class SupabaseError(Exception):
     """A safe, user-facing Supabase connectivity or query error."""
+
+
+BUSINESS_AS_OF_DATE = date(2026, 11, 4)
+BUSINESS_TIMEZONE = ZoneInfo("Australia/Sydney")
+
+
+def business_as_of_date() -> date:
+    """Fixed demonstration date so seeded records remain comparable through presentation day."""
+    return BUSINESS_AS_OF_DATE
+
+
+def _local_day_start_utc(day: date) -> datetime:
+    return datetime.combine(day, time.min, tzinfo=BUSINESS_TIMEZONE).astimezone(timezone.utc)
 
 
 def configured() -> bool:
@@ -82,25 +96,38 @@ def _rows(table: str, select: str, *, filters: dict[str, str] | None = None,
 def load_business_data() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     products = _rows("products", "id,name,category,price", order="name.asc")
     inventory = {row["product_id"]: int(row["quantity"]) for row in _rows("inventory_levels", "product_id,quantity")}
-    since = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
-    sales = _rows("sales_records", "product_id,sold_at,quantity", filters={"sold_at": f"gte.{since}"})
-    now = datetime.now(timezone.utc)
-    week_start = now - timedelta(days=7)
+    as_of = business_as_of_date()
+    first_day = as_of - timedelta(days=13)
+    current_week_start = as_of - timedelta(days=6)
+    sales = _rows(
+        "sales_records", "product_id,sold_at,quantity,revenue",
+        filters={
+            "and": f"(sold_at.gte.{_local_day_start_utc(first_day).isoformat()},sold_at.lt.{_local_day_start_utc(as_of + timedelta(days=1)).isoformat()})",
+        },
+    )
     computed = []
     for product in products:
-        current = previous = 0
+        current = previous = current_revenue = previous_revenue = 0.0
         for sale in sales:
             if sale.get("product_id") != product["id"]:
                 continue
             sold_at = datetime.fromisoformat(str(sale["sold_at"]).replace("Z", "+00:00"))
-            if sold_at >= week_start:
+            if sold_at.tzinfo is None:
+                sold_at = sold_at.replace(tzinfo=timezone.utc)
+            sale_day = sold_at.astimezone(BUSINESS_TIMEZONE).date()
+            if sale_day >= current_week_start:
                 current += int(sale["quantity"])
+                current_revenue += float(sale.get("revenue", 0))
             else:
                 previous += int(sale["quantity"])
+                previous_revenue += float(sale.get("revenue", 0))
         computed.append({
             "id": product["id"], "name": product["name"], "category": product["category"],
             "price": float(product["price"]), "stock": inventory.get(product["id"], 0),
             "units_sold_7d": current, "units_sold_prev_7d": previous,
+            "revenue_7d": round(current_revenue, 2), "revenue_prev_7d": round(previous_revenue, 2),
+            "units_sold_14d": current + previous,
+            "revenue_14d": round(current_revenue + previous_revenue, 2),
         })
     feedback = _rows("customer_feedback", "id,product_id,category,content,submitted_at", order="submitted_at.desc", limit=100)
     return computed, feedback
@@ -113,10 +140,35 @@ def load_active_promotions() -> list[dict[str, Any]]:
                  order="ends_at.asc", limit=50)
 
 
-def load_inventory_movements(limit: int = 25) -> list[dict[str, Any]]:
+def load_inventory_movements(limit: int = 25, product_id: str | None = None) -> list[dict[str, Any]]:
     products = {row["id"]: row["name"] for row in _rows("products", "id,name")}
-    movements = _rows("inventory_movements", "id,product_id,movement_type,quantity,occurred_at,note", order="occurred_at.desc", limit=limit)
+    filters = {"product_id": f"eq.{product_id}"} if product_id else None
+    movements = _rows("inventory_movements", "id,product_id,movement_type,quantity,occurred_at,note",
+                      filters=filters, order="occurred_at.desc", limit=limit)
     return [{**movement, "product_name": products.get(movement["product_id"], movement["product_id"])} for movement in movements]
+
+
+def load_product_sales_series(product_id: str, days: int) -> list[dict[str, Any]]:
+    """Aggregate recorded sales into Sydney calendar days for a product."""
+    today = business_as_of_date()
+    first_day = today - timedelta(days=days - 1)
+    rows = _rows("sales_records", "sold_at,quantity,revenue",
+                 filters={
+                     "product_id": f"eq.{product_id}",
+                     "and": f"(sold_at.gte.{_local_day_start_utc(first_day).isoformat()},sold_at.lt.{_local_day_start_utc(today + timedelta(days=1)).isoformat()})",
+                 },
+                 order="sold_at.asc")
+    totals = {first_day + timedelta(days=offset): {"quantity": 0, "revenue": 0.0} for offset in range(days)}
+    for row in rows:
+        sold_at = datetime.fromisoformat(str(row["sold_at"]).replace("Z", "+00:00"))
+        if sold_at.tzinfo is None:
+            sold_at = sold_at.replace(tzinfo=timezone.utc)
+        local_day = sold_at.astimezone(BUSINESS_TIMEZONE).date()
+        if local_day in totals:
+            totals[local_day]["quantity"] += int(row["quantity"])
+            totals[local_day]["revenue"] += float(row["revenue"])
+    return [{"date": day.isoformat(), "quantity": values["quantity"], "revenue": round(values["revenue"], 2)}
+            for day, values in totals.items()]
 
 
 def record_inventory_movement(record: dict[str, Any]) -> dict[str, Any]:

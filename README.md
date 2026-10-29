@@ -6,7 +6,7 @@ Proof-of-concept for ELEC5620 Stage 2, based on the group's Stage 1 report. It p
 
 | Stage 1 / Stage 2 requirement | First-slice implementation |
 | --- | --- |
-| Owner natural-language request and Manager coordination | `POST /api/analyze`; workflow is inferred from the request and routed to visible specialist steps |
+| Owner natural-language request and Manager coordination | `POST /api/assistant` answers supported sales rankings from records, routes clear diagnostic requests to a visible agent workflow, and asks the owner to choose when intent is unclear |
 | Sales, Inventory, Pricing, Marketing roles | `backend/app/orchestrator.py`; deterministic demo evidence clearly comes from seeded data |
 | Consolidated evidence and limitations | Analysis result cards and recommendation evidence/limitations |
 | Human oversight and advisory-only output | Recommendation decisions only change prototype status; no business action is executed |
@@ -15,6 +15,7 @@ Proof-of-concept for ELEC5620 Stage 2, based on the group's Stage 1 report. It p
 | Customer enquiries and feedback | `/customer` product/price/stock/promotion lookup and feedback form; answers are record-grounded, feedback is validated and contact details masked |
 | Iterative owner scoping | Optional product scope in the analysis composer; the saved run identifies the narrowed evidence set |
 | Inventory movements | Owner-only receipt/write-off form changes the selected inventory level and creates a timestamped movement/audit record |
+| Product history and trends | Overview highlights the highest-risk product; Product trends shows 7/14-day daily sales quantity or revenue and recorded inventory movements via a read-only API, without schema changes |
 | Feedback triage | Product/category filters, explainable theme/sentiment/priority labels, and a manual-review audit action; no reply is sent automatically |
 | Explainable dashboard | 7-day product-sales comparison bars, stock cover indicators, visible evidence and limitations |
 | Agile collaboration and contribution | No Jira history or member contributions are fabricated; group members should add actual records/statements |
@@ -65,14 +66,15 @@ The Vite development server proxies `/api` to `http://localhost:8000`.
 
 ## Demo walkthrough
 
-1. Open the owner dashboard and choose one of the four scenario chips, or type a business question.
-2. Start the analysis and follow each specialist agent's status and evidence.
-3. Review the advisory recommendation, supporting data, uncertainty, and approval label.
-4. Approve or reject a high-risk recommendation. The audit feed records the decision and time; the UI explicitly says no external business action occurred.
-   Rejecting requires a nonblank reason in both the dashboard and the API; approving may omit a note.
-5. The four Stage 1 flows are represented by sales decline, overstock, demand spike, and customer feedback. Use the optional product scope to perform a narrower follow-up run.
-6. Use **Record movement** in Inventory & sales only for a deliberate receipt or write-off. In Supabase modes it writes to `inventory_movements` and updates `inventory_levels`; in demo mode the change lasts until the API restarts.
-7. Use **Mark for manual review** in Customer voice to add an owner-review audit record. It does not contact the customer.
+1. Open the owner dashboard and type a question, or choose a scenario chip to fill an example prompt. The chip does not start work automatically.
+2. Simple questions such as the product with the lowest sales revenue are answered directly from sales records. Diagnostic questions start the relevant four-agent workflow; unclear questions offer workflow choices and preserve the text you entered.
+3. The illustrative reporting date is fixed at 4 November 2026. The dashboard, trend charts, and direct sales answers use the period ending on that date so the presentation view does not age while the group project is idle.
+4. For an agent run, review the advisory recommendation, supporting data, uncertainty, and approval label.
+5. Approve or reject a high-risk recommendation. The audit feed records the decision and time; the UI explicitly says no external business action occurred.
+   A rejection reason is optional; if entered, it is saved with the decision.
+6. The four Stage 1 flows are represented by sales decline, overstock, demand spike, and customer feedback. Use the optional product scope to perform a narrower follow-up run.
+7. Use **Record movement** in Inventory & sales only for a deliberate receipt or write-off. In Supabase modes it writes to `inventory_movements` and updates `inventory_levels`; in demo mode the change lasts until the API restarts.
+8. Use **Mark for manual review** in Customer voice to add an owner-review audit record. It does not contact the customer.
 
 ## Data and integrations
 
